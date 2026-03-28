@@ -1,0 +1,86 @@
+# Runtime outputs and local working data
+.codex_tmp/
+data/
+images/
+
+# Model weights and checkpoints
+src/models/
+external/deep3dbox_demo_model/
+/*.pt
+/*.pth
+/*.ckpt
+
+# Python caches
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+
+# Experiment outputs and vendored environments
+experiments/**/outputs/
+experiments/**/outputs_*/
+experiments/**/frames/
+experiments/**/single_frame_probe_*/
+experiments/**/vendor/
+
+# Node and frontend build artifacts
+node_modules/
+dist/
+build/
+dist-ssr/
+coverage/
+
+# Logs and temp files
+*.log
+logs/
+tmp/
+temp/
+*.tmp
+*.bak
+*.cache
+.cache/
+
+# Environment files
+.env
+.env.local
+.env.development
+.env.production
+.env.*.local
+
+# IDE and editor files
+.vscode/
+.idea/
+*.code-workspace
+*.iml
+*.iws
+*.ipr
+.history/
+*.sublime-project
+*.sublime-workspace
+*.swp
+*.swo
+*~
+.#*
+
+# OS files
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.DocumentRevisions-V100
+.fseventsd
+.Spotlight-V100
+.TemporaryItems
+.Trashes
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+
+# Misc local tool state
+.claude/worktrees/
+.claude/settings.local.json
+external/MonoGround/
