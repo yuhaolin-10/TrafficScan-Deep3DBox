@@ -25,6 +25,7 @@ class ViewerPanel(QtWidgets.QFrame):
     manual_roi_save_requested = QtCore.pyqtSignal() if hasattr(QtCore, "pyqtSignal") else QtCore.Signal()
     manual_roi_changed = QtCore.pyqtSignal(object) if hasattr(QtCore, "pyqtSignal") else QtCore.Signal(object)
     manual_roi_finished = QtCore.pyqtSignal(object) if hasattr(QtCore, "pyqtSignal") else QtCore.Signal(object)
+    manual_roi_selection_changed = QtCore.pyqtSignal(object) if hasattr(QtCore, "pyqtSignal") else QtCore.Signal(object)
     manual_roi_context_requested = (
         QtCore.pyqtSignal(int, object, object)
         if hasattr(QtCore, "pyqtSignal")
@@ -41,17 +42,19 @@ class ViewerPanel(QtWidgets.QFrame):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._layers_state = {
-            "lane_mask": True,
+        self._processing_layers_state = {
+            "lane_mask": False,
             "footprint": True,
             "boxes_3d": True,
             "labels": False,
         }
+        self._preview_display_mode = "仅显示底面"
+        self._scene_loaded = False
         self._updating_video_slider = False
 
         self.setStyleSheet("background:#0b1220;")
 
-        self.viewer = ImageViewer("Drop/select an image to preview")
+        self.viewer = ImageViewer(self._placeholder_html())
         self.viewer.setStyleSheet("background:#05070c;border-left:1px solid #243041;border-right:1px solid #243041;")
         self.viewer.setMinimumSize(240, 180)
         self.viewer.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Ignored)
@@ -60,11 +63,7 @@ class ViewerPanel(QtWidgets.QFrame):
         self.toolbar.setStyleSheet(
             "QFrame{background:#111827;border:1px solid #243041;border-bottom:0px;}"
             "QLabel{color:#cbd5e1;}"
-            "QToolButton{background:#172033;border:1px solid #314055;color:#dbe4ee;"
-            "padding:7px 11px;border-radius:9px;}"
-            "QToolButton:hover{background:#1e293b;}"
-            "QToolButton:checked{background:#1d4ed8;border-color:#2563eb;color:#ffffff;}"
-            "QPushButton{background:#1f2937;border:1px solid #334155;color:#e5e7eb;padding:7px 11px;border-radius:9px;}"
+            "QPushButton{background:#1f2937;border:1px solid #334155;color:#e5e7eb;padding:8px 12px;border-radius:10px;}"
             "QPushButton:hover{background:#273449;}"
             "QPushButton:disabled{color:#64748b;border-color:#1f2937;background:#111827;}"
         )
@@ -76,45 +75,46 @@ class ViewerPanel(QtWidgets.QFrame):
         toolbar_row.setContentsMargins(0, 0, 0, 0)
         toolbar_row.setSpacing(8)
 
-        tools_title = QtWidgets.QLabel("Preview Tools")
-        tools_title.setStyleSheet("color:#f8fafc;font-size:12px;font-weight:600;padding-right:6px;")
+        tools_title = QtWidgets.QLabel("区域操作")
+        tools_title.setStyleSheet("color:#f8fafc;font-size:13px;font-weight:600;padding-right:6px;")
         toolbar_row.addWidget(tools_title, 0)
 
-        self.btn_layer_lane = self._make_toggle_button("Lane")
-        self.btn_layer_footprint = self._make_toggle_button("Footprint")
-        self.btn_layer_boxes = self._make_toggle_button("3D Box")
-        self.btn_layer_labels = self._make_toggle_button("Labels")
-        toolbar_row.addWidget(self.btn_layer_lane, 0)
-        toolbar_row.addWidget(self.btn_layer_footprint, 0)
-        toolbar_row.addWidget(self.btn_layer_boxes, 0)
-        toolbar_row.addWidget(self.btn_layer_labels, 0)
-
-        toolbar_row.addSpacing(12)
-        toolbar_row.addWidget(self._make_separator(), 0)
-        toolbar_row.addSpacing(12)
-
-        self.btn_roi_draw = self._make_action_button("Draw ROI")
-        self.btn_roi_finish = self._make_action_button("Finish")
-        self.btn_roi_clear = self._make_action_button("Clear")
-        self.btn_roi_save = self._make_action_button("Save ROI")
+        self.btn_roi_draw = self._make_action_button("框选车道")
+        self.btn_roi_finish = self._make_action_button("完成框选")
+        self.btn_roi_clear = self._make_action_button("清空区域")
+        self.btn_roi_save = self._make_action_button("保存规则")
+        self.btn_roi_save.setVisible(False)
         toolbar_row.addWidget(self.btn_roi_draw, 0)
         toolbar_row.addWidget(self.btn_roi_finish, 0)
         toolbar_row.addWidget(self.btn_roi_clear, 0)
         toolbar_row.addWidget(self.btn_roi_save, 0)
         toolbar_row.addStretch(1)
+        self.display_mode_combo = QtWidgets.QComboBox()
+        self.display_mode_combo.addItems(["无", "仅显示底面", "3D框"])
+        self.display_mode_combo.setCurrentText(self._preview_display_mode)
+        self.display_mode_combo.setStyleSheet(
+            "QComboBox{background:#0f172a;border:1px solid #334155;color:#e5e7eb;padding:6px 12px;border-radius:10px;min-width:132px;}"
+            "QComboBox::drop-down{border:0px;width:22px;}"
+            "QComboBox QAbstractItemView{background:#0f172a;border:1px solid #334155;color:#e5e7eb;selection-background-color:#1d4ed8;}"
+        )
+        toolbar_row.addWidget(self.display_mode_combo, 0)
         toolbar_root.addLayout(toolbar_row)
 
         status_row = QtWidgets.QHBoxLayout()
         status_row.setContentsMargins(0, 0, 0, 0)
         status_row.setSpacing(8)
-        self.lbl_roi_status = QtWidgets.QLabel("ROI: auto lane region")
+        self.lbl_roi_status = QtWidgets.QLabel("当前还没有区域")
         self.lbl_roi_status.setWordWrap(True)
         self.lbl_roi_status.setStyleSheet("color:#cbd5e1;font-size:11px;")
         self.lbl_roi_status.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred)
-        self.lbl_toolbar_hint = QtWidgets.QLabel("Left click to add points, right click or double click to finish")
+        self.lbl_toolbar_hint = QtWidgets.QLabel("从左侧导入素材后，可在这里框选区域并查看分析结果")
         self.lbl_toolbar_hint.setStyleSheet("color:#64748b;font-size:11px;")
+        self.lbl_toolbar_hint.setWordWrap(True)
+        self.lbl_toolbar_hint.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
         status_row.addWidget(self.lbl_roi_status, 1)
-        status_row.addWidget(self.lbl_toolbar_hint, 0, QtCore.Qt.AlignRight)
+        status_row.addWidget(self.lbl_toolbar_hint, 1)
+        self.lbl_roi_status.setVisible(False)
+        self.lbl_toolbar_hint.setVisible(False)
         toolbar_root.addLayout(status_row)
 
         self.video_controls = QtWidgets.QFrame()
@@ -136,15 +136,15 @@ class ViewerPanel(QtWidgets.QFrame):
         video_row = QtWidgets.QHBoxLayout()
         video_row.setContentsMargins(0, 0, 0, 0)
         video_row.setSpacing(8)
-        self.btn_video_prev = self._make_action_button("Prev")
-        self.btn_video_play = self._make_action_button("Play")
+        self.btn_video_prev = self._make_action_button("上一帧")
+        self.btn_video_play = self._make_action_button("播放")
         self.btn_video_play.setCheckable(True)
-        self.btn_video_next = self._make_action_button("Next")
+        self.btn_video_next = self._make_action_button("下一帧")
         self.video_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
         self.video_slider.setMinimum(0)
         self.video_slider.setMaximum(0)
         self.video_slider.setEnabled(False)
-        self.lbl_video_position = QtWidgets.QLabel("Frame -- / --")
+        self.lbl_video_position = QtWidgets.QLabel("帧 -- / --")
         self.lbl_video_position.setStyleSheet("color:#e2e8f0;font-size:11px;font-weight:600;")
         video_row.addWidget(self.btn_video_prev, 0)
         video_row.addWidget(self.btn_video_play, 0)
@@ -156,9 +156,9 @@ class ViewerPanel(QtWidgets.QFrame):
         video_meta_row = QtWidgets.QHBoxLayout()
         video_meta_row.setContentsMargins(0, 0, 0, 0)
         video_meta_row.setSpacing(8)
-        self.lbl_video_source = QtWidgets.QLabel("Preview: original video")
+        self.lbl_video_source = QtWidgets.QLabel("视频预览")
         self.lbl_video_source.setStyleSheet("color:#94a3b8;font-size:11px;")
-        self.lbl_video_hint = QtWidgets.QLabel("Use play, slider, or frame stepping to inspect the video")
+        self.lbl_video_hint = QtWidgets.QLabel("可播放、拖动时间条或逐帧查看")
         self.lbl_video_hint.setStyleSheet("color:#64748b;font-size:11px;")
         video_meta_row.addWidget(self.lbl_video_source, 1)
         video_meta_row.addWidget(self.lbl_video_hint, 0, QtCore.Qt.AlignRight)
@@ -173,8 +173,8 @@ class ViewerPanel(QtWidgets.QFrame):
         status_root = QtWidgets.QHBoxLayout(self.viewer_status)
         status_root.setContentsMargins(12, 8, 12, 8)
         status_root.setSpacing(12)
-        self.lbl_view_file = QtWidgets.QLabel("No image")
-        self.lbl_view_zoom = QtWidgets.QLabel("Zoom --")
+        self.lbl_view_file = QtWidgets.QLabel("未选择素材")
+        self.lbl_view_zoom = QtWidgets.QLabel("缩放 --")
         status_root.addWidget(self.lbl_view_file, 1)
         status_root.addWidget(self.lbl_view_zoom, 0)
 
@@ -195,79 +195,129 @@ class ViewerPanel(QtWidgets.QFrame):
         self.viewer.manual_roi_changed.connect(self._on_manual_roi_changed)
         self.viewer.manual_roi_finished.connect(self._on_manual_roi_finished)
         self.viewer.manual_roi_drawing_changed.connect(self._on_manual_roi_drawing_changed)
+        self.viewer.manual_roi_selection_changed.connect(self._on_manual_roi_selection_changed)
         self.viewer.manual_roi_context_requested.connect(self.manual_roi_context_requested)
         self.viewer.region_direction_finished.connect(self.region_direction_finished)
-
-        self.btn_layer_lane.toggled.connect(lambda value: self._set_layer_enabled("lane_mask", value))
-        self.btn_layer_footprint.toggled.connect(lambda value: self._set_layer_enabled("footprint", value))
-        self.btn_layer_boxes.toggled.connect(lambda value: self._set_layer_enabled("boxes_3d", value))
-        self.btn_layer_labels.toggled.connect(lambda value: self._set_layer_enabled("labels", value))
+        self.viewer.region_direction_drawing_changed.connect(self._on_region_direction_drawing_changed)
 
         self.btn_roi_draw.clicked.connect(self.manual_roi_start_requested.emit)
         self.btn_roi_finish.clicked.connect(self.manual_roi_finish_requested.emit)
         self.btn_roi_clear.clicked.connect(self.manual_roi_clear_requested.emit)
         self.btn_roi_save.clicked.connect(self.manual_roi_save_requested.emit)
+        self.display_mode_combo.currentTextChanged.connect(self.set_display_mode)
 
         self.btn_video_prev.clicked.connect(lambda: self.video_step_requested.emit(-1))
         self.btn_video_next.clicked.connect(lambda: self.video_step_requested.emit(1))
         self.btn_video_play.toggled.connect(self._on_video_play_toggled)
         self.video_slider.valueChanged.connect(self._on_video_slider_changed)
 
-        self.btn_layer_lane.setChecked(self._layers_state["lane_mask"])
-        self.btn_layer_footprint.setChecked(self._layers_state["footprint"])
-        self.btn_layer_boxes.setChecked(self._layers_state["boxes_3d"])
-        self.btn_layer_labels.setChecked(self._layers_state["labels"])
-        self.btn_roi_finish.setEnabled(False)
-
-    def _make_toggle_button(self, text: str):
-        button = QtWidgets.QToolButton()
-        button.setCheckable(True)
-        button.setText(text)
-        return button
+        self._refresh_toolbar_state()
+        self.show_empty_state()
 
     def _make_action_button(self, text: str):
-        button = QtWidgets.QPushButton(text)
-        return button
+        return QtWidgets.QPushButton(text)
 
-    def _make_separator(self):
-        separator = QtWidgets.QFrame()
-        separator.setFrameShape(QtWidgets.QFrame.VLine)
-        separator.setStyleSheet("background:#243041;color:#243041;")
-        separator.setFixedWidth(1)
-        return separator
+    def _placeholder_html(self) -> str:
+        return (
+            "<div style='text-align:center;color:#94a3b8;'>"
+            "<div style='font-size:22px;color:#e2e8f0;font-weight:600;margin-bottom:10px;'>"
+            "左侧导入图片或视频后，这里会显示预览与分析结果"
+            "</div>"
+            "<div style='font-size:13px;line-height:1.8;'>"
+            "1. 从左侧导入素材<br/>"
+            "2. 需要时框选车道并设置规则<br/>"
+            "3. 点击“开始分析”查看结果"
+            "</div>"
+            "<div style='font-size:12px;color:#64748b;margin-top:16px;'>"
+            "分析完成后，可在这里点击区域查看规则"
+            "</div>"
+            "</div>"
+        )
 
     def _on_viewer_zoom_changed(self, percent: int):
         if percent <= 0:
-            self.lbl_view_zoom.setText("Zoom --")
+            self.lbl_view_zoom.setText("缩放 --")
             return
-        self.lbl_view_zoom.setText(f"Zoom {percent}%")
+        self.lbl_view_zoom.setText(f"缩放 {percent}%")
 
     def _set_layer_enabled(self, key: str, enabled: bool):
-        self._layers_state[key] = enabled
+        self._processing_layers_state[key] = enabled
         self.layer_toggled.emit(key, enabled)
+
+    def set_display_mode(self, mode: str):
+        normalized = str(mode or "").strip()
+        if normalized not in {"无", "仅显示底面", "3D框"}:
+            normalized = "仅显示底面"
+        if self.display_mode_combo.currentText() != normalized:
+            self.display_mode_combo.blockSignals(True)
+            self.display_mode_combo.setCurrentText(normalized)
+            self.display_mode_combo.blockSignals(False)
+        if normalized == self._preview_display_mode:
+            return
+        self._preview_display_mode = normalized
+        self.layer_toggled.emit("preview_mode", True)
+
+    def preview_layers_state(self):
+        state = {
+            "lane_mask": False,
+            "footprint": False,
+            "boxes_3d": False,
+            "labels": False,
+        }
+        if self._preview_display_mode == "仅显示底面":
+            state["footprint"] = True
+        elif self._preview_display_mode == "3D框":
+            state["footprint"] = True
+            state["boxes_3d"] = True
+        return state
+
+    def display_mode_text(self) -> str:
+        return str(self._preview_display_mode or "仅显示底面")
 
     def _on_manual_roi_changed(self, regions):
         self._update_roi_status(regions)
+        self._refresh_toolbar_state()
         self.manual_roi_changed.emit(regions)
 
     def _on_manual_roi_finished(self, points):
         self._update_roi_status(points)
+        self._refresh_toolbar_state()
         self.manual_roi_finished.emit(points)
 
+    def _on_manual_roi_selection_changed(self, region_index):
+        self._update_roi_status(self.viewer.manual_roi_regions())
+        self.manual_roi_selection_changed.emit(region_index)
+
     def _on_manual_roi_drawing_changed(self, active: bool):
-        self.btn_roi_draw.setEnabled(not active)
-        self.btn_roi_finish.setEnabled(active)
+        self._refresh_toolbar_state()
         if active:
-            self.lbl_roi_status.setText("ROI: drawing in progress")
-            self.lbl_toolbar_hint.setText("ROI mode: left click to add points, right click or double click to finish")
+            self.lbl_roi_status.setText("正在框选车道")
+            self.lbl_toolbar_hint.setText("左键依次点击，回到起点闭合；按 Esc 取消当前框选")
             self.lbl_toolbar_hint.setStyleSheet("color:#fbbf24;font-size:11px;font-weight:600;")
         else:
             self._update_roi_status(self.viewer.manual_roi_regions())
-            self.lbl_toolbar_hint.setText("Click a region to select it. Right click binds rules, Delete removes selected, Clear removes all")
             self.lbl_toolbar_hint.setStyleSheet("color:#64748b;font-size:11px;")
+            if self._scene_loaded:
+                self.lbl_toolbar_hint.setText("点击中间画面中的某个区域查看或编辑规则")
+            else:
+                self.lbl_toolbar_hint.setText("从左侧导入素材后，可在这里框选车道并查看分析结果")
+
+    def _on_region_direction_drawing_changed(self, active: bool):
+        self._refresh_toolbar_state()
+        if active:
+            self.lbl_toolbar_hint.setText("请在选中区域内点击两次设置允许方向")
+            self.lbl_toolbar_hint.setStyleSheet("color:#fbbf24;font-size:11px;font-weight:600;")
+        else:
+            self.lbl_toolbar_hint.setStyleSheet("color:#64748b;font-size:11px;")
+            if self.viewer.is_manual_roi_drawing():
+                self.lbl_toolbar_hint.setText("左键依次点击，回到起点闭合；按 Esc 取消当前框选")
+            elif self._scene_loaded:
+                self.lbl_toolbar_hint.setText("点击中间画面中的某个区域查看或编辑规则")
+            else:
+                self.lbl_toolbar_hint.setText("从左侧导入素材后，可在这里框选车道并查看分析结果")
 
     def _on_video_play_toggled(self, checked: bool):
-        self.btn_video_play.setText("Pause" if checked else "Play")
+        self.btn_video_play.setText("暂停" if checked else "播放")
         self.video_play_toggled.emit(bool(checked))
 
     def _on_video_slider_changed(self, value: int):
@@ -276,33 +326,63 @@ class ViewerPanel(QtWidgets.QFrame):
         self.video_seek_requested.emit(int(value))
 
     def _update_roi_status(self, regions):
+        if not self._scene_loaded:
+            self.lbl_roi_status.setText("当前还没有区域")
+            return
         count = len(regions or [])
         selected_index = self.viewer.selected_manual_roi_index()
-        if count > 0:
-            if selected_index is not None:
-                self.lbl_roi_status.setText(f"ROI: {count} manual region(s), selected #{selected_index + 1}")
-            else:
-                self.lbl_roi_status.setText(f"ROI: {count} manual region(s)")
-        else:
-            self.lbl_roi_status.setText("ROI: auto lane region")
+        if count <= 0:
+            self.lbl_roi_status.setText("当前还没有区域")
+            return
+        if selected_index is not None:
+            self.lbl_roi_status.setText(f"已选中区域 {selected_index + 1} / 共 {count} 个区域")
+            return
+        self.lbl_roi_status.setText(f"已创建 {count} 个区域，点击预览区可选中区域")
+
+    def _refresh_toolbar_state(self):
+        has_regions = len(self.viewer.manual_roi_regions()) > 0
+        is_drawing = self.viewer.is_manual_roi_drawing()
+        is_direction = self.viewer.is_region_direction_drawing()
+        can_edit = self._scene_loaded and not is_direction
+        self.btn_roi_draw.setEnabled(can_edit and not is_drawing)
+        self.btn_roi_finish.setEnabled(can_edit and is_drawing)
+        self.btn_roi_clear.setEnabled(self._scene_loaded and has_regions and not is_direction)
+        self.btn_roi_save.setEnabled(self._scene_loaded and not is_drawing and not is_direction)
 
     def layers_state(self):
-        return dict(self._layers_state)
+        return dict(self._processing_layers_state)
+
+    def show_empty_state(self):
+        self._scene_loaded = False
+        self.viewer.clear(self._placeholder_html())
+        self.set_video_controls_visible(False)
+        self.lbl_view_file.setText("未选择素材")
+        self.lbl_view_zoom.setText("缩放 --")
+        self.lbl_roi_status.setText("当前还没有区域")
+        self.lbl_toolbar_hint.setText("从左侧导入素材后，可在这里框选车道并查看分析结果")
+        self.lbl_toolbar_hint.setStyleSheet("color:#64748b;font-size:11px;")
+        self._refresh_toolbar_state()
 
     def set_image_path(self, file_path: str):
         path = Path(file_path)
+        self._scene_loaded = True
         self.lbl_view_file.setText(path.name)
         pixmap = QtGui.QPixmap(str(path))
         self.viewer.set_pixmap(None if pixmap.isNull() else pixmap, reset_view=True)
         if pixmap.isNull():
-            self.lbl_view_file.setText("Preview unavailable")
+            self.lbl_view_file.setText("预览不可用")
+        self._update_roi_status(self.viewer.manual_roi_regions())
+        self._refresh_toolbar_state()
 
     def set_pixmap(self, pixmap, *, label: str = "", reset_view: bool = True):
+        self._scene_loaded = True
         if label:
             self.lbl_view_file.setText(label)
         self.viewer.set_pixmap(pixmap, reset_view=reset_view)
         if pixmap is None or pixmap.isNull():
-            self.lbl_view_file.setText("Preview unavailable")
+            self.lbl_view_file.setText("预览不可用")
+        self._update_roi_status(self.viewer.manual_roi_regions())
+        self._refresh_toolbar_state()
 
     def set_video_controls_visible(self, visible: bool):
         self.video_controls.setVisible(bool(visible))
@@ -320,10 +400,10 @@ class ViewerPanel(QtWidgets.QFrame):
         self.btn_video_play.blockSignals(True)
         self.btn_video_play.setChecked(False)
         self.btn_video_play.blockSignals(False)
-        self.btn_video_play.setText("Play")
-        self.lbl_video_position.setText("Frame -- / --")
-        self.lbl_video_source.setText("Preview: original video")
-        self.lbl_video_hint.setText("Use play, slider, or frame stepping to inspect the video")
+        self.btn_video_play.setText("播放")
+        self.lbl_video_position.setText("帧 -- / --")
+        self.lbl_video_source.setText("视频预览")
+        self.lbl_video_hint.setText("可播放、拖动时间条或逐帧查看")
 
     def set_video_playback_state(
         self,
@@ -359,36 +439,44 @@ class ViewerPanel(QtWidgets.QFrame):
         self.btn_video_play.blockSignals(True)
         self.btn_video_play.setChecked(bool(is_playing))
         self.btn_video_play.blockSignals(False)
-        self.btn_video_play.setText("Pause" if is_playing else "Play")
-        self.lbl_video_position.setText(position_text or f"Frame {current_frame + 1}/{max(1, total_frames)}")
-        self.lbl_video_source.setText(source_text or "Preview: original video")
-        self.lbl_video_hint.setText(hint_text or "Use play, slider, or frame stepping to inspect the video")
+        self.btn_video_play.setText("暂停" if is_playing else "播放")
+        self.lbl_video_position.setText(position_text or f"帧 {current_frame + 1}/{max(1, total_frames)}")
+        self.lbl_video_source.setText(source_text or "视频预览")
+        self.lbl_video_hint.setText(hint_text or "可播放、拖动时间条或逐帧查看")
 
     def refresh(self):
         self.viewer.refresh()
 
-    def set_manual_roi(self, points):
-        self.viewer.set_manual_roi(points)
-        self._update_roi_status(points)
+    def set_manual_roi(self, points, selected_index=None):
+        self.viewer.set_manual_roi(points, selected_index=selected_index)
+        self._update_roi_status(self.viewer.manual_roi_regions())
+        self._refresh_toolbar_state()
 
     def manual_roi_regions(self):
         return self.viewer.manual_roi_regions()
 
+    def selected_manual_roi_index(self):
+        return self.viewer.selected_manual_roi_index()
+
     def start_manual_roi_drawing(self, *, clear_existing: bool = False):
         self.viewer.start_manual_roi_drawing(clear_existing=clear_existing)
+        self._refresh_toolbar_state()
 
     def finish_manual_roi_drawing(self):
         new_region = self.viewer.finish_manual_roi_drawing()
         self._update_roi_status(self.viewer.manual_roi_regions())
+        self._refresh_toolbar_state()
         return new_region
 
     def clear_manual_roi(self):
         self.viewer.clear_manual_roi()
         self._update_roi_status([])
+        self._refresh_toolbar_state()
 
     def delete_selected_manual_roi(self):
         deleted = self.viewer.delete_selected_manual_roi()
         self._update_roi_status(self.viewer.manual_roi_regions())
+        self._refresh_toolbar_state()
         return deleted
 
     def set_region_direction_lines(self, direction_lines):
@@ -399,6 +487,7 @@ class ViewerPanel(QtWidgets.QFrame):
 
     def start_region_direction_drawing(self, region_index: int):
         self.viewer.start_region_direction_drawing(region_index)
+        self._refresh_toolbar_state()
 
     def is_manual_roi_drawing(self) -> bool:
         return self.viewer.is_manual_roi_drawing()

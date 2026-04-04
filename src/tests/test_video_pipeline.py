@@ -28,8 +28,24 @@ class _DummyVehicleDetector:
 
 
 class _DummyViolationChecker:
+    def __init__(self):
+        self.last_lane_mask = None
+
     def check(self, _footprint, _lane_mask):
+        self.last_lane_mask = _lane_mask
         return False, 0.0
+
+
+class _DummyLaneDetector:
+    def __init__(self):
+        self.detect_calls = 0
+
+    def detect(self, frame):
+        self.detect_calls += 1
+        mask = np.zeros(frame.shape[:2], dtype=np.uint8)
+        polygon = np.asarray([[4, 4], [28, 4], [28, 28], [4, 28]], dtype=np.int32)
+        mask[4:29, 4:29] = 255
+        return mask, [polygon]
 
 
 def test_violation_plate_summary_uses_only_nearby_frames():
@@ -182,3 +198,23 @@ def test_process_frame_can_skip_intermediate_render():
 
     assert rendered is None
     assert result["vehicle_count"] == 0
+
+
+def test_process_frame_uses_auto_lane_segmentation_when_no_manual_override():
+    frame = np.zeros((32, 32, 3), dtype=np.uint8)
+    lane_detector = _DummyLaneDetector()
+    violation_checker = _DummyViolationChecker()
+
+    result, rendered = process_frame(
+        frame,
+        lane_detector=lane_detector,
+        vehicle_detector=_DummyVehicleDetector(),
+        violation_checker=violation_checker,
+        render_output=False,
+    )
+
+    assert rendered is None
+    assert lane_detector.detect_calls == 1
+    assert result["lane_source"] == "auto"
+    assert len(result["lane_polygons"]) == 1
+    assert result["lane_area_px"] > 0

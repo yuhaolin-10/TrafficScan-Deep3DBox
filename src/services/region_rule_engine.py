@@ -15,9 +15,9 @@ RULE_NO_NON_MOTOR = "no_non_motor"
 RULE_NO_WRONG_WAY = "no_wrong_way"
 
 RULE_DISPLAY_NAMES = {
-    RULE_NO_PARKING: "No Parking",
-    RULE_NO_NON_MOTOR: "No Non-Motor",
-    RULE_NO_WRONG_WAY: "Wrong Way",
+    RULE_NO_PARKING: "禁止停车",
+    RULE_NO_NON_MOTOR: "禁止非机动车",
+    RULE_NO_WRONG_WAY: "禁止逆行",
 }
 
 

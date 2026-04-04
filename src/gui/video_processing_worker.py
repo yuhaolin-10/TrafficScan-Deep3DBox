@@ -8,6 +8,7 @@ if str(SRC_DIR) not in sys.path:
 
 try:
     from .qt import QtCore
+    from ..core.lane_segmenter import LaneSegmenter
     from ..core.plate_recognizer import create_plate_recognizer
     from ..core.vehicle_detector_deep3dbox import VehicleDetector3D
     from ..core.violation_checker import ViolationChecker
@@ -17,6 +18,7 @@ except Exception:
         from gui.qt import QtCore
     except Exception:
         from qt import QtCore
+    from core.lane_segmenter import LaneSegmenter
     from core.plate_recognizer import create_plate_recognizer
     from core.vehicle_detector_deep3dbox import VehicleDetector3D
     from core.violation_checker import ViolationChecker
@@ -87,6 +89,8 @@ class VideoProcessingWorker(QtCore.QObject):
 
     def _create_components(self):
         lane_detector = None
+        if Path(self.lane_model_path).exists():
+            lane_detector = LaneSegmenter(self.lane_model_path)
         vehicle_detector = VehicleDetector3D(self.vehicle_model_path)
         violation_checker = ViolationChecker(threshold=self.threshold)
         plate_recognizer = create_plate_recognizer()
@@ -122,14 +126,18 @@ class VideoProcessingWorker(QtCore.QObject):
             return
 
         try:
-            self.log.emit("info", "Loading Deep3DBox model for video processing in manual-ROI mode...")
+            self.log.emit("info", "Loading lane segmentation and Deep3DBox models for video processing...")
             lane_detector, vehicle_detector, violation_checker, plate_recognizer = self._create_components()
+            if lane_detector is not None:
+                self.log.emit("success", "Emergency-lane segmentation is enabled for video processing")
+            else:
+                self.log.emit("warning", f"Lane segmentation model not found: {self.lane_model_path}")
             if getattr(plate_recognizer, "enabled", False):
                 self.log.emit("success", "Plate recognition is enabled for video processing")
             else:
                 reason = str(getattr(plate_recognizer, "reason", "disabled"))
                 self.log.emit("warning", f"Plate recognition is disabled for video processing: {reason}")
-            self.log.emit("success", "Video model initialization complete (automatic lane segmentation disabled)")
+            self.log.emit("success", "Video model initialization complete")
         except Exception as exc:
             message = f"Video initialization failed: {exc}"
             self.log.emit("error", message)

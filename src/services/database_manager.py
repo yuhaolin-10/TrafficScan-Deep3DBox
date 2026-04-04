@@ -153,9 +153,9 @@ class DatabaseManager:
             ensure_sequence_schema(self.conn)
 
             self.conn.commit()
-            print(f"[DB] 鏁版嵁搴撳凡杩炴帴: {self.db_path}")
+            print(f"[DB] Connected: {self.db_path}")
         except Exception as exc:
-            print(f"[DB] 鏁版嵁搴撳垵濮嬪寲澶辫触: {exc}")
+            print(f"[DB] Initialization failed: {exc}")
 
     def _now(self):
         return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -219,7 +219,7 @@ class DatabaseManager:
             self.conn.commit()
             return int(cursor.lastrowid)
         except Exception as exc:
-            print(f"[DB] 鍒涘缓 record 澶辫触: {exc}")
+            print(f"[DB] Failed to create record: {exc}")
             return -1
 
     def mark_record_failed(self, record_id, error_message):
@@ -236,7 +236,7 @@ class DatabaseManager:
             )
             self.conn.commit()
         except Exception as exc:
-            print(f"[DB] 鏍囪澶辫触 record 澶辫触: {exc}")
+            print(f"[DB] Failed to mark record as failed: {exc}")
 
     def complete_record_success(self, record_id, result):
         """
@@ -346,11 +346,11 @@ class DatabaseManager:
             self.conn.commit()
             return int(cursor.lastrowid)
         except Exception as exc:
-            print(f"[DB] 鎻掑叆 legacy 璁板綍澶辫触: {exc}")
+            print(f"[DB] Failed to insert legacy record: {exc}")
             return -1
 
     def close(self):
         if self.conn:
             self.conn.close()
-            print("[DB] 鏁版嵁搴撹繛鎺ュ凡鍏抽棴")
+            print("[DB] Connection closed")
 

@@ -159,9 +159,9 @@ def render_result(frame, lane_mask, detections, layers=None, selected_idx=None):
         conf = float(det.get("confidence", 0.0))
 
         base_color = (0, 0, 255) if is_violating else (0, 255, 0)
-        color = (0, 255, 255) if is_selected else base_color  # selected -> yellow
+        color = (255, 0, 0) if is_selected else base_color
         mask_outline_thickness = 4 if is_selected else 3
-        footprint_thickness = 6 if is_selected else (5 if is_violating else 4)
+        footprint_thickness = 4 if is_selected else (5 if is_violating else 4)
         box_thickness = 3 if is_selected else 2
 
         if state["vehicle_mask"]:
@@ -185,25 +185,30 @@ def render_result(frame, lane_mask, detections, layers=None, selected_idx=None):
                 for i, j in [(0, 1), (3, 2), (7, 6), (4, 5)]:
                     cv2.line(result, tuple(corners[i]), tuple(corners[j]), color, box_thickness, cv2.LINE_AA)
 
-        if is_violating:
+        if is_selected:
             plate_text = str(det.get("plate_text", "") or "").strip()
             if not plate_text:
                 plate_text = str(det.get("track_plate_text", "") or "").strip()
+            anchor = det.get("label_anchor")
+            if not anchor:
+                anchor = det.get("track_anchor", [])
+            if not anchor:
+                bbox = np.array(det.get("bbox", []), dtype=np.float32).reshape(-1)
+                if bbox.size == 4:
+                    anchor = [float(bbox[0]), float(bbox[1])]
+            info_lines = [
+                f"{vehicle_type}  conf={conf:.2f}",
+                ("Violation" if is_violating else "Normal") + f"  ratio={ratio:.2f}",
+            ]
             if plate_text:
-                anchor = det.get("label_anchor")
-                if not anchor:
-                    anchor = det.get("track_anchor", [])
-                if not anchor:
-                    bbox = np.array(det.get("bbox", []), dtype=np.float32).reshape(-1)
-                    if bbox.size == 4:
-                        anchor = [float(bbox[0]), float(bbox[1])]
-                _draw_text_block(
-                    result,
-                    anchor,
-                    [f"Plate: {plate_text}"],
-                    fg_color=(255, 235, 235),
-                    bg_color=(52, 10, 10),
-                )
+                info_lines.append(f"Plate: {plate_text}")
+            _draw_text_block(
+                result,
+                anchor,
+                info_lines,
+                fg_color=(255, 255, 255),
+                bg_color=(14, 18, 28),
+            )
 
         if state["yaw_debug_overlay"]:
             vectors = det.get("yaw_debug_vectors", {}) or {}

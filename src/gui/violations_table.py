@@ -1,468 +1,455 @@
-import math
 from pathlib import Path
 
 try:
-    from .qt import QtGui, QtWidgets
+    from .qt import QtCore, QtWidgets
 except Exception:
     try:
-        from gui.qt import QtGui, QtWidgets
+        from gui.qt import QtCore, QtWidgets
     except Exception:
-        from qt import QtGui, QtWidgets
+        from qt import QtCore, QtWidgets
 
 
-class ViolationsTable(QtWidgets.QFrame):
+class RegionRulesPanel(QtWidgets.QFrame):
+    rule_toggled = (
+        QtCore.pyqtSignal(int, str, bool)
+        if hasattr(QtCore, "pyqtSignal")
+        else QtCore.Signal(int, str, bool)
+    )
+    set_direction_requested = QtCore.pyqtSignal(int) if hasattr(QtCore, "pyqtSignal") else QtCore.Signal(int)
+    clear_direction_requested = QtCore.pyqtSignal(int) if hasattr(QtCore, "pyqtSignal") else QtCore.Signal(int)
+    frame_jump_requested = QtCore.pyqtSignal(int) if hasattr(QtCore, "pyqtSignal") else QtCore.Signal(int)
+
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setMinimumWidth(280)
+        self._current_region_index = None
+        self.setMinimumWidth(320)
         self.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Expanding)
         self.setStyleSheet("background:#0b1220;border-left:1px solid #243041;")
 
         header = QtWidgets.QFrame()
         header.setStyleSheet("background:#111827;border-bottom:1px solid #243041;")
         header_layout = QtWidgets.QVBoxLayout(header)
-        header_layout.setContentsMargins(14, 14, 14, 12)
+        header_layout.setContentsMargins(16, 16, 16, 14)
         header_layout.setSpacing(4)
 
-        title = QtWidgets.QLabel("Details")
+        title = QtWidgets.QLabel("信息面板")
         title.setStyleSheet("color:#f8fafc;font-size:16px;font-weight:600;")
-        subtitle = QtWidgets.QLabel("Select an image or video to inspect metadata, detections, and summary results.")
+        subtitle = QtWidgets.QLabel("查看当前媒体的违规车辆信息，并继续编辑选中区域规则。")
         subtitle.setWordWrap(True)
         subtitle.setStyleSheet("color:#94a3b8;font-size:12px;")
         header_layout.addWidget(title)
         header_layout.addWidget(subtitle)
+        subtitle.setVisible(False)
 
-        self.details = QtWidgets.QPlainTextEdit(self)
-        self.details.setReadOnly(True)
-        self.details.setStyleSheet(
-            "QPlainTextEdit{background:#0b1220;border:0px;color:#d1d5db;font-size:12px;padding:12px;}"
+        self.content = QtWidgets.QWidget()
+        self.content.setStyleSheet(
+            "QLabel{color:#d1d5db;}"
+            "QCheckBox{color:#e5e7eb;font-size:12px;padding:4px 0;}"
+            "QCheckBox::indicator{width:16px;height:16px;}"
+            "QCheckBox::indicator:unchecked{border:1px solid #475569;background:#0f172a;border-radius:4px;}"
+            "QCheckBox::indicator:checked{border:1px solid #2563eb;background:#2563eb;border-radius:4px;}"
+            "QPushButton{background:#1f2937;border:1px solid #334155;color:#e5e7eb;padding:8px 12px;border-radius:10px;}"
+            "QPushButton:hover{background:#273449;}"
+            "QPushButton:disabled{color:#64748b;border-color:#1f2937;background:#111827;}"
+            "QListWidget{background:#0b1220;border:1px solid #243041;border-radius:12px;padding:6px;outline:0;}"
+            "QListWidget::item{border-bottom:1px solid #162135;padding:8px 6px;}"
         )
+        body = QtWidgets.QVBoxLayout(self.content)
+        body.setContentsMargins(16, 16, 16, 16)
+        body.setSpacing(12)
+
+        self.media_card = QtWidgets.QFrame()
+        self.media_card.setStyleSheet("QFrame{background:#0f172a;border:1px solid #1f2a3a;border-radius:14px;}")
+        self.media_card.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Preferred)
+        self.media_card.setMaximumHeight(260)
+        media_root = QtWidgets.QVBoxLayout(self.media_card)
+        media_root.setContentsMargins(14, 14, 14, 14)
+        media_root.setSpacing(10)
+        self.lbl_media_title = QtWidgets.QLabel("当前媒体")
+        self.lbl_media_title.setStyleSheet("color:#f8fafc;font-size:15px;font-weight:600;")
+        self.lbl_media_summary = QtWidgets.QLabel("请选择左侧媒体。")
+        self.lbl_media_summary.setWordWrap(True)
+        self.lbl_media_summary.setStyleSheet("color:#94a3b8;font-size:12px;line-height:1.6;")
+        self.lbl_media_hint = QtWidgets.QLabel("违规车辆")
+        self.lbl_media_hint.setStyleSheet("color:#93c5fd;font-size:12px;font-weight:600;")
+        self.media_list = QtWidgets.QListWidget()
+        self.media_list.setWordWrap(True)
+        self.media_list.setAlternatingRowColors(False)
+        self.media_list.setVerticalScrollMode(QtWidgets.QAbstractItemView.ScrollPerPixel)
+        self.media_list.setMaximumHeight(184)
+        self.media_list.itemClicked.connect(self._on_media_item_clicked)
+        self.lbl_media_hint.setVisible(False)
+        media_root.addWidget(self.lbl_media_title)
+        media_root.addWidget(self.lbl_media_summary)
+        media_root.addWidget(self.lbl_media_hint)
+        media_root.addWidget(self.media_list)
+
+        self.empty_card = QtWidgets.QFrame()
+        self.empty_card.setStyleSheet("QFrame{background:#0f172a;border:1px solid #1f2a3a;border-radius:14px;}")
+        self.empty_card.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Expanding)
+        self.empty_card.setMinimumHeight(260)
+        empty_root = QtWidgets.QVBoxLayout(self.empty_card)
+        empty_root.setContentsMargins(14, 14, 14, 14)
+        empty_root.setSpacing(8)
+        self.lbl_empty_title = QtWidgets.QLabel("当前还没有区域")
+        self.lbl_empty_title.setStyleSheet("color:#f8fafc;font-size:14px;font-weight:600;")
+        self.lbl_empty_text = QtWidgets.QLabel("先点击“框选车道”创建区域。")
+        self.lbl_empty_text.setWordWrap(True)
+        self.lbl_empty_text.setStyleSheet("color:#94a3b8;font-size:12px;line-height:1.6;")
+        empty_root.addStretch(1)
+        empty_root.addWidget(self.lbl_empty_title)
+        empty_root.addWidget(self.lbl_empty_text)
+        empty_root.addStretch(1)
+
+        self.region_card = QtWidgets.QFrame()
+        self.region_card.setStyleSheet("QFrame{background:#0f172a;border:1px solid #1f2a3a;border-radius:14px;}")
+        self.region_card.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Expanding)
+        self.region_card.setMinimumHeight(340)
+        region_root = QtWidgets.QVBoxLayout(self.region_card)
+        region_root.setContentsMargins(14, 14, 14, 14)
+        region_root.setSpacing(14)
+
+        self.lbl_region_name = QtWidgets.QLabel("区域 1")
+        self.lbl_region_name.setStyleSheet("color:#f8fafc;font-size:15px;font-weight:600;")
+        self.lbl_region_status = QtWidgets.QLabel("已启用")
+        self.lbl_region_status.setStyleSheet("color:#93c5fd;font-size:11px;")
+        self.lbl_region_hint = QtWidgets.QLabel("为当前选中区域启用规则后，分析时会直接生效。")
+        self.lbl_region_hint.setWordWrap(True)
+        self.lbl_region_hint.setStyleSheet("color:#94a3b8;font-size:12px;line-height:1.6;")
+
+        region_root.addWidget(self.lbl_region_name)
+        region_root.addWidget(self.lbl_region_status)
+        region_root.addWidget(self.lbl_region_hint)
+        self.lbl_region_hint.setVisible(False)
+
+        self.chk_no_parking = QtWidgets.QCheckBox("禁止停车")
+        self.chk_no_non_motor = QtWidgets.QCheckBox("禁止非机动车")
+        self.chk_no_wrong_way = QtWidgets.QCheckBox("禁止逆行")
+        region_root.addWidget(self.chk_no_parking)
+        region_root.addWidget(self.chk_no_non_motor)
+        region_root.addWidget(self.chk_no_wrong_way)
+
+        self.direction_card = QtWidgets.QFrame()
+        self.direction_card.setStyleSheet("QFrame{background:#0b1220;border:1px solid #243041;border-radius:12px;}")
+        direction_root = QtWidgets.QVBoxLayout(self.direction_card)
+        direction_root.setContentsMargins(12, 12, 12, 12)
+        direction_root.setSpacing(8)
+        self.lbl_direction_title = QtWidgets.QLabel("允许方向")
+        self.lbl_direction_title.setStyleSheet("color:#f8fafc;font-size:13px;font-weight:600;")
+        self.lbl_direction_status = QtWidgets.QLabel("启用“禁止逆行”后可设置允许方向。")
+        self.lbl_direction_status.setWordWrap(True)
+        self.lbl_direction_status.setStyleSheet("color:#94a3b8;font-size:12px;line-height:1.6;")
+        direction_root.addWidget(self.lbl_direction_title)
+        direction_root.addWidget(self.lbl_direction_status)
+
+        direction_actions = QtWidgets.QHBoxLayout()
+        direction_actions.setContentsMargins(0, 0, 0, 0)
+        direction_actions.setSpacing(8)
+        self.btn_set_direction = QtWidgets.QPushButton("设置允许方向")
+        self.btn_clear_direction = QtWidgets.QPushButton("清除允许方向")
+        direction_actions.addWidget(self.btn_set_direction, 1)
+        direction_actions.addWidget(self.btn_clear_direction, 1)
+        direction_root.addLayout(direction_actions)
+
+        region_root.addStretch(1)
+        region_root.addWidget(self.direction_card)
+
+        body.addWidget(self.media_card, 0)
+        body.addWidget(self.empty_card, 1)
+        body.addWidget(self.region_card, 1)
+
+        self.scroll = QtWidgets.QScrollArea()
+        self.scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        self.scroll.setStyleSheet("QScrollArea{background:#0b1220;border:0px;}")
+        self.scroll.setWidget(self.content)
 
         root = QtWidgets.QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
         root.addWidget(header, 0)
-        root.addWidget(self.details, 1)
+        root.addWidget(self.scroll, 1)
 
-        self.clear_results()
+        self.chk_no_parking.toggled.connect(lambda checked: self._emit_rule_toggle("no_parking", checked))
+        self.chk_no_non_motor.toggled.connect(lambda checked: self._emit_rule_toggle("no_non_motor", checked))
+        self.chk_no_wrong_way.toggled.connect(lambda checked: self._emit_rule_toggle("no_wrong_way", checked))
+        self.btn_set_direction.clicked.connect(self._emit_set_direction)
+        self.btn_clear_direction.clicked.connect(self._emit_clear_direction)
 
-    def clear_results(self):
-        self.details.setPlainText(
-            "No file is selected yet.\n\n"
-            "Choose an image or video from the workspace to inspect it here."
-        )
+        self.show_no_media_selected()
 
-    def show_file_details(self, image_path: str, *, status: str = "", failure_reason: str = "", result: dict | None = None):
-        self.details.setPlainText(
-            self._format_file_details(
-                image_path=image_path,
-                status=status,
-                failure_reason=failure_reason,
-                result=result or {},
+    def _emit_rule_toggle(self, rule_type: str, enabled: bool):
+        if self._current_region_index is None:
+            return
+        self.rule_toggled.emit(int(self._current_region_index), str(rule_type), bool(enabled))
+
+    def _emit_set_direction(self):
+        if self._current_region_index is None:
+            return
+        self.set_direction_requested.emit(int(self._current_region_index))
+
+    def _emit_clear_direction(self):
+        if self._current_region_index is None:
+            return
+        self.clear_direction_requested.emit(int(self._current_region_index))
+
+    def _on_media_item_clicked(self, item):
+        if item is None:
+            return
+        frame_index = item.data(QtCore.Qt.UserRole)
+        if frame_index is None:
+            return
+        try:
+            self.frame_jump_requested.emit(int(frame_index))
+        except Exception:
+            return
+
+    def _set_media_visible(self, visible: bool):
+        self.media_card.setVisible(bool(visible))
+
+    def _set_region_mode(self, *, empty_title: str = "", empty_text: str = "", show_region: bool = False):
+        self.empty_card.setVisible(not show_region)
+        self.region_card.setVisible(show_region)
+        self._refresh_panel_density(show_region=show_region)
+        if not show_region:
+            self.lbl_empty_title.setText(empty_title)
+            self.lbl_empty_text.setText(empty_text)
+
+    def _refresh_panel_density(self, *, show_region: bool):
+        self.lbl_media_summary.setVisible(not show_region)
+        self.media_list.setMaximumHeight(160 if show_region else 220)
+
+    def _add_media_entry(self, text: str, *, frame_index=None):
+        item = QtWidgets.QListWidgetItem(str(text))
+        item.setData(QtCore.Qt.UserRole, frame_index)
+        if frame_index is not None:
+            item.setToolTip(f"点击跳转到第 {int(frame_index) + 1} 帧")
+        self.media_list.addItem(item)
+
+    def _set_media_entries(self, title: str, summary: str, entries: list[dict], *, clickable: bool = False):
+        self._set_media_visible(True)
+        entry_count = len(entries or [])
+        self.lbl_media_title.setText(f"{title} ({entry_count})" if entry_count > 0 else title)
+        self.lbl_media_summary.setText(summary)
+        self.media_list.clear()
+        self.lbl_media_hint.setText(f"违规车辆 ({len(entries)})" if entries else "违规车辆")
+        if not entries:
+            self._add_media_entry("当前未识别到可展示的违规车辆信息。")
+            return
+        for entry in entries:
+            frame_index = entry.get("frame_index") if clickable else None
+            self._add_media_entry(str(entry.get("text", "")), frame_index=frame_index)
+
+    def _rule_label(self, rule_type: str) -> str:
+        mapping = {
+            "no_parking": "禁止停车",
+            "no_non_motor": "禁止非机动车",
+            "no_wrong_way": "禁止逆行",
+        }
+        return mapping.get(str(rule_type or "").strip().lower(), str(rule_type or "未知规则"))
+
+    def _violation_label(self, text: str, *, rule_type: str = "") -> str:
+        raw = str(text or "").strip()
+        if "," in raw:
+            parts = [self._violation_label(part, rule_type=rule_type) for part in raw.split(",")]
+            parts = [part for part in parts if str(part).strip()]
+            if parts:
+                return "、".join(parts)
+        normalized = raw.lower().replace("-", " ").replace("_", " ")
+        normalized = " ".join(normalized.split())
+        mapping = {
+            "no parking": "禁止停车",
+            "parking": "禁止停车",
+            "no non motor": "禁止非机动车",
+            "no non-motor": "禁止非机动车",
+            "non motor": "禁止非机动车",
+            "non-motor": "禁止非机动车",
+            "wrong way": "禁止逆行",
+            "no wrong way": "禁止逆行",
+            "emergency lane occupation": "占用应急车道",
+            "emergency lane": "占用应急车道",
+            "emergency_lane": "占用应急车道",
+        }
+        translated = mapping.get(normalized)
+        if translated:
+            return translated
+        if raw:
+            return raw
+        return self._rule_label(rule_type) if rule_type else "违规"
+
+    def show_media_overview(self, file_path: str, result: dict | None):
+        path = Path(file_path)
+        if not result:
+            self._set_media_entries(
+                path.name,
+                "当前素材还没有分析结果，先勾选后点击“开始分析”即可。",
+                [],
             )
-        )
+            return
 
-    def show_video_details(self, video_path: str, *, status: str = "", failure_reason: str = "", video_info=None, result: dict | None = None):
-        self.details.setPlainText(
-            self._format_video_details(
-                video_path=video_path,
-                status=status,
-                failure_reason=failure_reason,
-                video_info=video_info,
-                result=result or {},
-            )
-        )
-
-    def append_results_for_file(self, image_path: str, result: dict):
-        self.show_file_details(image_path, status="done", result=result)
-
-    def focus_detection(self, image_path: str, result: dict, detection: dict, *, candidate_count=1, point=None):
-        self.details.setPlainText(
-            self._format_detection_details(
-                image_path=image_path,
-                result=result,
-                detection=detection,
-                candidate_count=candidate_count,
-                point=point,
-            )
-        )
-
-    def show_lane_details(self, image_path: str, result: dict, lane_index: int, lane_polygon, *, point=None):
-        violating = [det for det in result.get("detections", []) if bool(det.get("is_violating", False))]
-        lines = [
-            "Current object: lane region",
-            f"File name: {Path(image_path).name}",
-            f"File path: {self._display_path(image_path)}",
-            f"Record id: {result.get('record_id', '-')}",
-            f"Clicked point: {point if point is not None else '-'}",
-            f"Lane index: {lane_index}",
-            f"Polygon points: {len(lane_polygon) if lane_polygon else 0}",
-            f"Lane area: {int(result.get('lane_area_px', 0))}",
-            f"Detected vehicles: {int(result.get('vehicle_count', 0))}",
-            f"Violations: {int(result.get('violation_count', 0))}",
-            f"Any violation: {'yes' if bool(result.get('any_violation', False)) else 'no'}",
-        ]
-        if violating:
-            lines.extend(["", "Top violating detections:"])
-            for det in sorted(violating, key=lambda item: float(item.get("violation_ratio", 0.0)), reverse=True)[:5]:
-                plate_text = str(det.get("plate_text", "") or "").strip()
-                plate_suffix = f" | plate {plate_text}" if plate_text else ""
-                lines.append(
-                    f"- Vehicle #{det.get('index', '?')} | {self._vehicle_type_text(det.get('vehicle_type'))} | "
-                    f"ratio {float(det.get('violation_ratio', 0.0)):.1%}{plate_suffix}"
+        media_type = str(result.get("media_type", "image") or "image").lower()
+        if media_type == "video":
+            events_by_track = {}
+            for event in list(result.get("region_rule_events", []) or []):
+                track_id = str(event.get("track_id", "") or "").strip() or f"track-{len(events_by_track) + 1}"
+                bucket = events_by_track.setdefault(
+                    track_id,
+                    {
+                        "track_id": track_id,
+                        "vehicle_type": str(event.get("vehicle_type", "vehicle") or "vehicle"),
+                        "rule_labels": [],
+                        "first_frame_index": event.get("frame_index"),
+                    },
                 )
-        else:
-            lines.extend(["", "No violating vehicle is currently associated with this lane region."])
-        self.details.setPlainText("\n".join(lines))
-
-    def _format_file_details(self, image_path, status, failure_reason, result):
-        path = Path(str(image_path))
-        image_info = self._read_image_info(path, result)
-        timestamp = result.get("timestamp") or "-"
-        processed_path = result.get("processed_path") or "-"
-        lines = [
-            "Current object: image file",
-            f"File name: {path.name}",
-            f"File path: {self._display_path(path)}",
-            f"Status: {status or 'unknown'}",
-            f"Exists: {'yes' if image_info['exists'] else 'no'}",
-            f"File size: {self._format_file_size(image_info['size_bytes'])}",
-            f"Resolution: {self._format_resolution(image_info['width'], image_info['height'])}",
-        ]
-
-        if result:
-            lines.extend(
-                [
-                    f"Record id: {result.get('record_id', '-')}",
-                    f"Processed at: {timestamp}",
-                    f"Lane regions: {len(result.get('lane_polygons', []))}",
-                    f"Detected vehicles: {int(result.get('vehicle_count', 0))}",
-                    f"Violations: {int(result.get('violation_count', 0))}",
-                    f"Recognized violating plates: {int(result.get('violating_plate_count', 0) or 0)}",
-                    f"Any violation: {'yes' if bool(result.get('any_violation', False)) else 'no'}",
-                    f"Result image: {processed_path}",
-                ]
-            )
-            violating_plates = list(result.get("violating_plates", []) or [])
-            if violating_plates:
-                lines.extend(["", "Violating plates:"])
-                for item in violating_plates[:8]:
-                    lines.append(self._format_plate_summary_line(item, include_track=False))
-            elif int(result.get("violation_count", 0) or 0) > 0:
-                missing = int(result.get("violating_plate_missing_count", 0) or 0)
-                suffix = f" ({missing} vehicle(s) unread)" if missing > 0 else ""
-                lines.extend(["", f"Violating plates: no stable plate read{suffix}."])
-        else:
-            lines.extend([
-                "Result: not processed yet.",
-                "Hint: run the detector, then click an object in the preview for more details.",
-            ])
-
-        if failure_reason:
-            lines.extend(["", "Failure reason:", str(failure_reason)])
-
-        return "\n".join(lines)
-
-    def _format_video_details(self, video_path, status, failure_reason, video_info, result):
-        path = Path(str(video_path))
-        info = video_info or {}
-        frame_count = int(self._value(info, 'frame_count', result.get('frame_count', 0)) or 0)
-        fps = float(self._value(info, 'fps', result.get('fps', 0.0)) or 0.0)
-        duration_s = float(self._value(info, 'duration_s', result.get('duration_s', 0.0)) or 0.0)
-        width = int(self._value(info, 'width', result.get('image_width', 0)) or 0)
-        height = int(self._value(info, 'height', result.get('image_height', 0)) or 0)
-        preview_frame_index = int(result.get('preview_frame_index', self._value(info, 'preview_frame_index', 0)) or 0)
-        codec = str(self._value(info, 'codec', result.get('codec', '')) or '-')
-        preview_frame_path = result.get('preview_frame_path') or '-'
-
-        lines = [
-            "Current object: video file",
-            f"File name: {path.name}",
-            f"File path: {self._display_path(path)}",
-            f"Status: {status or 'unknown'}",
-            f"Exists: {'yes' if path.exists() else 'no'}",
-            f"File size: {self._format_file_size(path.stat().st_size if path.exists() else None)}",
-            f"Resolution: {self._format_resolution(width, height)}",
-            f"Frames: {frame_count}",
-            f"FPS: {fps:.2f}" if fps > 0 else "FPS: unknown",
-            f"Duration: {self._format_duration(duration_s)}",
-            f"Codec: {codec}",
-            f"Representative frame index: {preview_frame_index}",
-        ]
-
-        if result:
-            count_line_names = [
-                str(name)
-                for name in (result.get('count_line_names', []) or [])
-                if str(name) != 'auto_center_line'
-            ]
-            count_line_text = ', '.join(str(name) for name in count_line_names) if count_line_names else '-'
-            count_line_source = self._display_count_line_source(result.get('count_line_source', '-'))
-            processed_frames = int(result.get('processed_frame_count', 0))
-            expected_processed_frames = int(result.get('expected_processed_frame_count', 0) or 0)
-            progress_percent = float(result.get('progress_percent', 0.0) or 0.0)
-            throughput = float(result.get('processed_frames_per_s', 0.0) or 0.0)
-            eta_seconds = float(result.get('estimated_remaining_s', 0.0) or 0.0)
-            current_frame_index = int(result.get('current_frame_index', 0) or 0)
-            current_vehicle_count = int(result.get('current_vehicle_count', 0) or 0)
-            current_violation_count = int(result.get('current_violation_count', 0) or 0)
-            progress_lines = []
-            if str(result.get('status', '')) == 'running' or str(status or '').lower() == 'running':
-                current_detected_plate_count = int(result.get("current_detected_plate_count", 0) or 0)
-                current_region_rule_count = int(result.get("current_region_rule_violation_count", 0) or 0)
-                progress_lines.extend(
-                    [
-                        f"Run progress: {progress_percent:.1f}%",
-                        f"Processed frames: {processed_frames}/{expected_processed_frames}" if expected_processed_frames > 0 else f"Processed frames: {processed_frames}",
-                        f"Current source frame index: {current_frame_index}",
-                        f"Throughput: {throughput:.2f} fps" if throughput > 0 else "Throughput: warming up",
-                        f"ETA: {self._format_duration(eta_seconds)}" if eta_seconds > 0 else "ETA: estimating",
-                        f"Current vehicles in frame: {current_vehicle_count}",
-                        f"Current violations in frame: {current_violation_count}",
-                        f"Current region-rule hits in frame: {current_region_rule_count}",
-                        f"Current detected plates in frame: {current_detected_plate_count}",
-                    ]
+                bucket["vehicle_type"] = str(event.get("vehicle_type", bucket["vehicle_type"]) or bucket["vehicle_type"])
+                frame_index = event.get("frame_index")
+                if frame_index is not None:
+                    current_min = bucket.get("first_frame_index")
+                    if current_min is None or int(frame_index) < int(current_min):
+                        bucket["first_frame_index"] = int(frame_index)
+                rule_label = self._violation_label(
+                    event.get("rule_label", ""),
+                    rule_type=event.get("rule_type", ""),
                 )
-            lines.extend(progress_lines)
-            lines.extend(
-                [
-                    f"Video status: {result.get('status', 'ready')}",
-                    f"Preview frame path: {preview_frame_path}",
-                    f"Processed video path: {result.get('processed_video_path', '-')}",
-                    f"Processed frames: {processed_frames}",
-                    f"Frame stride: {int(result.get('frame_stride', 1) or 1)}",
-                    f"Output FPS: {float(result.get('output_fps', 0.0)):.2f}" if float(result.get('output_fps', 0.0)) > 0 else "Output FPS: unknown",
-                    f"Vehicle instances: {int(result.get('total_vehicle_instances', 0))}",
-                    f"Max vehicles in one frame: {int(result.get('max_vehicle_count', 0))}",
-                    f"Tracks discovered: {int(result.get('track_count', 0))}",
-                    f"Confirmed tracks: {int(result.get('confirmed_track_count', 0))}",
-                    f"Moving tracks: {int(result.get('moving_track_count', 0))}",
-                    f"Traffic count total: {int(result.get('traffic_count_total', 0))}",
-                    f"Traffic forward: {int(result.get('traffic_count_forward', 0))}",
-                    f"Traffic backward: {int(result.get('traffic_count_backward', 0))}",
-                    f"Frames with count event: {int(result.get('frames_with_count_event', 0))}",
-                    f"Count line source: {count_line_source}",
-                    f"Count lines: {count_line_text}",
-                    f"Scene regions: {int(result.get('scene_region_count', 0) or 0)}",
-                    f"Region rule events: {int(result.get('region_rule_event_count', 0) or 0)}",
-                    f"No parking events: {int(result.get('region_rule_no_parking_count', 0) or 0)}",
-                    f"No non-motor events: {int(result.get('region_rule_no_non_motor_count', 0) or 0)}",
-                    f"Wrong-way events: {int(result.get('region_rule_no_wrong_way_count', 0) or 0)}",
-                    f"Frames with region-rule violation: {int(result.get('frames_with_region_rule_violation', 0) or 0)}",
-                    f"Frames with violation: {int(result.get('frames_with_violation', 0))}",
-                    f"Violation instances: {int(result.get('total_violation_instances', 0))}",
-                    f"Plate OCR attempts: {int(result.get('total_plate_ocr_attempt_count', 0) or 0)}",
-                    f"Plate OCR successes: {int(result.get('total_plate_ocr_success_count', 0) or 0)}",
-                    f"Violating tracks: {int(result.get('violating_track_count', 0) or 0)}",
-                    f"Tracks with stable plate: {int(result.get('violating_track_plate_count', 0) or 0)}",
-                    f"Any violation: {'yes' if bool(result.get('any_violation', False)) else 'no'}",
-                ]
+                if rule_label not in bucket["rule_labels"]:
+                    bucket["rule_labels"].append(rule_label)
+
+            for plate_item in list(result.get("violating_track_plates", []) or []):
+                track_id = str(plate_item.get("track_id", "") or "").strip()
+                if not track_id:
+                    continue
+                bucket = events_by_track.setdefault(
+                    track_id,
+                    {
+                        "track_id": track_id,
+                        "vehicle_type": str(plate_item.get("vehicle_type", "vehicle") or "vehicle"),
+                        "rule_labels": [],
+                        "first_frame_index": plate_item.get("first_violation_frame"),
+                    },
+                )
+                bucket["plate_text"] = str(plate_item.get("plate_text", "") or "").strip()
+                bucket["plate_confidence"] = float(plate_item.get("plate_confidence", 0.0) or 0.0)
+                bucket["plate_support_count"] = int(plate_item.get("plate_support_count", 0) or 0)
+                if bucket.get("first_frame_index") is None and plate_item.get("first_violation_frame") is not None:
+                    bucket["first_frame_index"] = int(plate_item.get("first_violation_frame"))
+
+            entries = []
+            for item in events_by_track.values():
+                plate_text = str(item.get("plate_text", "") or "").strip() or "未识别到车牌"
+                rule_text = "、".join(item.get("rule_labels", [])) or "违规"
+                frame_index = item.get("first_frame_index")
+                frame_text = f"第 {int(frame_index) + 1} 帧" if frame_index is not None else "帧未知"
+                plate_suffix = ""
+                if plate_text != "未识别到车牌":
+                    plate_suffix = (
+                        f" | 车牌 {plate_text}"
+                        f" | 置信度 {float(item.get('plate_confidence', 0.0) or 0.0):.2f}"
+                    )
+                entries.append(
+                    {
+                        "frame_index": frame_index,
+                        "text": (
+                            f"{rule_text} | 识别类型 {str(item.get('vehicle_type', 'vehicle'))}"
+                            f" | {frame_text}{plate_suffix if plate_suffix else ' | 未识别到车牌'}"
+                        ),
+                    }
+                )
+
+            entries.sort(key=lambda item: int(item.get("frame_index", 10**9) if item.get("frame_index") is not None else 10**9))
+            processed_frames = int(result.get("processed_frame_count", 0) or 0)
+            frame_count = int(result.get("frame_count", 0) or 0)
+            summary = (
+                f"视频已分析：{processed_frames}/{frame_count} 帧，"
+                f"累计违规事件 {int(result.get('region_rule_event_count', 0) or 0)} 条。"
+                f" 点击下方条目可跳转到对应帧。"
             )
-            region_rule_events = list(result.get("region_rule_events", []) or [])
-            if region_rule_events:
-                lines.extend(["", "Recent region-rule events:"])
-                for item in region_rule_events[-10:]:
-                    lines.append(self._format_region_rule_event_line(item))
-            elif int(result.get("scene_region_count", 0) or 0) > 0:
-                suffix = " yet" if str(result.get("status", "")).strip().lower() == "running" else ""
-                lines.extend(["", f"Region-rule events: none triggered{suffix}."])
-            violating_track_plates = list(result.get("violating_track_plates", []) or [])
-            if violating_track_plates:
-                lines.extend(["", "Violating plates (fused by track):"])
-                for item in violating_track_plates[:10]:
-                    lines.append(self._format_plate_summary_line(item, include_track=True))
-            elif int(result.get("frames_with_violation", 0) or 0) > 0:
-                unread = int(result.get("unread_violating_track_count", 0) or 0)
-                suffix = f" ({unread} violating track(s) unread)" if unread > 0 else ""
-                lines.extend(["", f"Violating plates: no stable track-level plate read{suffix}."])
-        else:
-            lines.extend([
-                "Result: metadata only, not processed yet.",
-                "Hint: run the video pipeline to get tracking, traffic count, and violation summary.",
-            ])
+            self._set_media_entries(f"{path.name} · 视频", summary, entries, clickable=True)
+            return
 
-        if failure_reason:
-            lines.extend(["", "Failure reason:", str(failure_reason)])
+        entries = []
+        for detection in list(result.get("detections", []) or []):
+            if not bool(detection.get("is_violating", False)):
+                continue
+            plate_text = str(detection.get("plate_text", "") or "").strip() or "未识别到车牌"
+            entries.append(
+                {
+                    "text": (
+                        f"{self._violation_label(detection.get('violation_type', ''))} | "
+                        f"识别类型 {str(detection.get('vehicle_type', 'vehicle'))} | "
+                        f"{plate_text}"
+                    )
+                }
+            )
+        summary = (
+            f"图片共检测到 {int(result.get('vehicle_count', 0) or 0)} 辆车，"
+            f"其中违规 {int(result.get('violation_count', 0) or 0)} 辆。"
+        )
+        self._set_media_entries(f"{path.name} · 图片", summary, entries, clickable=False)
 
-        return "\n".join(lines)
+    def show_no_media_selected(self):
+        self._current_region_index = None
+        self._set_media_visible(False)
+        self.media_list.clear()
+        self._set_region_mode(
+            empty_title="先从左侧选择一个素材",
+            empty_text="选择图片或视频后，这里会显示当前媒体的违规车辆信息和区域规则。",
+            show_region=False,
+        )
 
-    def _format_detection_details(self, image_path, result, detection, candidate_count, point):
-        bbox = detection.get("bbox", [0, 0, 0, 0])
-        if len(bbox) != 4:
-            bbox = [0, 0, 0, 0]
+    def show_no_regions(self):
+        self._current_region_index = None
+        self._set_region_mode(
+            empty_title="当前还没有区域",
+            empty_text="先点击“框选车道”创建区域，再为该区域启用规则。",
+            show_region=False,
+        )
 
-        yaw_deg = math.degrees(float(detection.get("yaw", 0.0)))
-        lines = [
-            "Current object: vehicle detection",
-            f"File name: {Path(str(image_path)).name}",
-            f"File path: {self._display_path(image_path)}",
-            f"Record id: {result.get('record_id', '-')}",
-            f"Vehicle index: {detection.get('index', '-')}",
-            f"Vehicle type: {self._vehicle_type_text(detection.get('vehicle_type'))}",
-            f"Confidence: {float(detection.get('confidence', 0.0)):.3f}",
-            f"Violation: {'yes' if bool(detection.get('is_violating', False)) else 'no'}",
-            f"Violation type: {self._violation_type_text(detection.get('violation_type'))}",
-            f"Violation ratio: {float(detection.get('violation_ratio', 0.0)):.2%}",
-            f"Plate: {str(detection.get('plate_text', '') or '-')}",
-            f"Plate confidence: {float(detection.get('plate_confidence', 0.0)):.3f}",
-            f"Plate type: {str(detection.get('plate_type', '') or '-')}",
-            f"Plate support count: {int(detection.get('plate_support_count', 0) or 0)}",
-            f"Plate status: {self._plate_status_text(detection.get('plate_status'))}",
-            f"Yaw: {yaw_deg:.1f} deg",
-            f"Footprint area: {float(detection.get('footprint_area_px', 0.0)):.1f} px",
-            f"2D box: [x1={bbox[0]:.1f}, y1={bbox[1]:.1f}, x2={bbox[2]:.1f}, y2={bbox[3]:.1f}]",
-            f"Footprint points: {len(detection.get('footprint', []))}",
-            f"3D corner points: {len(detection.get('corners_2d', []))}",
-            f"Clicked point: {point if point is not None else '-'}",
-            f"Overlapping candidates: {candidate_count}",
-        ]
+    def show_region_selection_hint(self, region_count: int):
+        self._current_region_index = None
+        self._set_region_mode(
+            empty_title="请选择一个区域",
+            empty_text=f"当前共有 {int(region_count)} 个区域。点击中间画面中的某个区域后，这里会显示该区域的规则。",
+            show_region=False,
+        )
 
-        processed_path = result.get("processed_path")
-        if processed_path:
-            lines.append(f"Result image: {processed_path}")
+    def show_region_rules(self, entry: dict, region_index: int):
+        self._current_region_index = int(region_index)
+        self._set_region_mode(show_region=True)
 
-        return "\n".join(lines)
-
-    def _read_image_info(self, path: Path, result: dict):
-        exists = path.exists() and path.is_file()
-        size_bytes = None
-        if exists:
-            try:
-                size_bytes = int(path.stat().st_size)
-            except OSError:
-                size_bytes = None
-
-        width = int(result.get("image_width", 0) or 0)
-        height = int(result.get("image_height", 0) or 0)
-        if width <= 0 or height <= 0:
-            reader = QtGui.QImageReader(str(path))
-            size = reader.size()
-            if size.isValid():
-                width = max(width, int(size.width()))
-                height = max(height, int(size.height()))
-
-        return {
-            "exists": exists,
-            "size_bytes": size_bytes,
-            "width": width,
-            "height": height,
+        region_name = str(entry.get("name", "") or "").strip() or f"区域 {int(region_index) + 1}"
+        enabled = bool(entry.get("enabled", True))
+        direction_line = list(entry.get("direction_line", []) or [])
+        rule_types = {
+            str(binding.get("rule_type", "") or "").strip().lower(): bool(binding.get("enabled", True))
+            for binding in list(entry.get("rule_bindings", []) or [])
+            if str(binding.get("rule_type", "") or "").strip()
         }
 
-    def _format_resolution(self, width, height):
-        if int(width or 0) <= 0 or int(height or 0) <= 0:
-            return "unknown"
-        return f"{int(width)} x {int(height)}"
+        self.lbl_region_name.setText(region_name)
+        self.lbl_region_status.setText("已启用" if enabled else "未启用")
 
-    def _format_file_size(self, size_bytes):
-        if size_bytes is None or size_bytes < 0:
-            return "unknown"
-        size = float(size_bytes)
-        units = ["B", "KB", "MB", "GB"]
-        unit_index = 0
-        while size >= 1024.0 and unit_index < len(units) - 1:
-            size /= 1024.0
-            unit_index += 1
-        return f"{size:.1f} {units[unit_index]}"
-
-    def _format_duration(self, duration_s):
-        value = float(duration_s or 0.0)
-        if value <= 0.0:
-            return "unknown"
-        total_seconds = int(round(value))
-        minutes, seconds = divmod(total_seconds, 60)
-        hours, minutes = divmod(minutes, 60)
-        if hours > 0:
-            return f"{hours:d}:{minutes:02d}:{seconds:02d}"
-        return f"{minutes:d}:{seconds:02d}"
-
-    def _display_count_line_source(self, source):
-        text = str(source or "-").strip()
-        if text == "auto_center_line":
-            return "auto"
-        return text or "-"
-
-    def _display_path(self, path):
+        self.chk_no_parking.blockSignals(True)
+        self.chk_no_non_motor.blockSignals(True)
+        self.chk_no_wrong_way.blockSignals(True)
         try:
-            return str(Path(path).resolve())
-        except Exception:
-            return str(path)
+            self.chk_no_parking.setChecked(bool(rule_types.get("no_parking", False)))
+            self.chk_no_non_motor.setChecked(bool(rule_types.get("no_non_motor", False)))
+            self.chk_no_wrong_way.setChecked(bool(rule_types.get("no_wrong_way", False)))
+        finally:
+            self.chk_no_parking.blockSignals(False)
+            self.chk_no_non_motor.blockSignals(False)
+            self.chk_no_wrong_way.blockSignals(False)
 
-    def _vehicle_type_text(self, vehicle_type):
-        key = str(vehicle_type or "vehicle").strip().lower()
-        return {
-            "car": "car",
-            "truck": "truck",
-            "bus": "bus",
-            "motorcycle": "motorcycle",
-            "bicycle": "bicycle",
-            "person": "person",
-            "vehicle": "vehicle",
-        }.get(key, str(vehicle_type or "vehicle"))
-
-    def _violation_type_text(self, violation_type):
-        key = str(violation_type or "").strip().lower()
-        return {
-            "emergency lane occupation": "Emergency Lane Occupation",
-            "emergency_lane": "Emergency Lane Occupation",
-        }.get(key, str(violation_type or "none"))
-
-    def _plate_status_text(self, status):
-        key = str(status or "").strip().lower()
-        return {
-            "detected": "detected",
-            "not_found": "not found",
-            "skipped": "skipped",
-            "track_fused": "track fused",
-        }.get(key, key or "-")
-
-    def _format_plate_summary_line(self, item, *, include_track: bool):
-        vehicle_type = self._vehicle_type_text(item.get("vehicle_type"))
-        plate_text = str(item.get("plate_text", "") or "-")
-        confidence = float(item.get("plate_confidence", 0.0) or 0.0)
-        support = int(item.get("plate_support_count", 0) or 0)
-        plate_type = str(item.get("plate_type", "") or "-")
-        ratio = float(item.get("violation_ratio", item.get("max_violation_ratio", 0.0)) or 0.0)
-        prefix = f"- {str(item.get('track_id', '-'))} | " if include_track else f"- Vehicle #{int(item.get('index', 0) or 0)} | "
-        extra = ""
-        if include_track:
-            frames = list(item.get("source_frame_indices", []) or [])
-            if frames:
-                preview = ", ".join(str(int(v)) for v in frames[:4])
-                if len(frames) > 4:
-                    preview += ", ..."
-                extra = f" | frames {preview}"
-        return (
-            f"{prefix}{vehicle_type} | {plate_text} | conf {confidence:.2f} | "
-            f"support {support} | {plate_type} | ratio {ratio:.1%}{extra}"
-        )
-
-    def _region_rule_label_text(self, event):
-        rule_type = str(event.get("rule_type", "") or "").strip().lower()
-        return {
-            "no_parking": "No Parking",
-            "no_non_motor": "No Non-Motor",
-            "no_wrong_way": "Wrong Way",
-        }.get(rule_type, str(event.get("rule_label", "") or rule_type or "rule"))
-
-    def _format_region_rule_event_line(self, item):
-        rule_label = self._region_rule_label_text(item)
-        region_name = str(item.get("region_name", "") or item.get("region_id", "-") or "-")
-        track_id = str(item.get("track_id", "") or "-")
-        vehicle_type = self._vehicle_type_text(item.get("vehicle_type"))
-        frame_index = item.get("frame_index")
-        timestamp_s = item.get("timestamp_s")
-        frame_text = "-" if frame_index is None else str(int(frame_index))
-        if timestamp_s is None:
-            time_text = "-"
+        wrong_way_enabled = bool(rule_types.get("no_wrong_way", False))
+        has_direction = len(direction_line) == 2
+        self.direction_card.setVisible(wrong_way_enabled or has_direction)
+        if wrong_way_enabled:
+            if has_direction:
+                self.lbl_direction_status.setText("允许方向已设置，分析时会按该方向判断逆行。")
+            else:
+                self.lbl_direction_status.setText("允许方向尚未设置，请点击下方按钮完成设置。")
         else:
-            time_text = f"{float(timestamp_s):.1f}s"
-        return (
-            f"- {rule_label} | region {region_name} | track {track_id} | "
-            f"{vehicle_type} | frame {frame_text} | t {time_text}"
-        )
-
-    def _value(self, obj, name, default=None):
-        if obj is None:
-            return default
-        if isinstance(obj, dict):
-            return obj.get(name, default)
-        return getattr(obj, name, default)
+            self.lbl_direction_status.setText("启用“禁止逆行”后，可在这里设置允许方向。")
+        self.btn_set_direction.setEnabled(wrong_way_enabled)
+        self.btn_clear_direction.setEnabled(wrong_way_enabled and has_direction)

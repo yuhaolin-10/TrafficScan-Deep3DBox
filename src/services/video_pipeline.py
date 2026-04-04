@@ -1,4 +1,5 @@
 from datetime import datetime
+import json
 import math
 from pathlib import Path
 import time
@@ -133,6 +134,35 @@ def _build_render_lane_mask(image_shape, lane_polygons):
             continue
         cv2.fillPoly(lane_mask, [pts], 255)
     return lane_mask
+
+
+def _preview_detection_payload(detection: dict) -> dict:
+    payload = dict(detection or {})
+    return {
+        "vehicle_type": str(payload.get("vehicle_type", "vehicle") or "vehicle"),
+        "confidence": float(payload.get("confidence", 0.0) or 0.0),
+        "bbox": [float(v) for v in list(payload.get("bbox", []) or [])[:4]],
+        "footprint": [list(point) for point in list(payload.get("footprint", []) or [])],
+        "corners_2d": [list(point) for point in list(payload.get("corners_2d", []) or [])],
+        "mask_polygon": [list(point) for point in list(payload.get("mask_polygon", []) or [])],
+        "is_violating": bool(payload.get("is_violating", False)),
+        "violation_ratio": float(payload.get("violation_ratio", 0.0) or 0.0),
+        "violation_type": str(payload.get("violation_type", "") or ""),
+        "label_anchor": list(payload.get("label_anchor", []) or []),
+        "track_anchor": list(payload.get("track_anchor", []) or []),
+        "plate_text": str(payload.get("plate_text", "") or ""),
+        "track_plate_text": str(payload.get("track_plate_text", "") or ""),
+    }
+
+
+def _preview_frame_payload(processed_frame_index: int, source_frame_index: int, timestamp_s, lane_polygons, detections) -> dict:
+    return {
+        "processed_frame_index": int(processed_frame_index),
+        "source_frame_index": int(source_frame_index),
+        "timestamp_s": None if timestamp_s is None else float(timestamp_s),
+        "lane_polygons": [[list(point) for point in list(polygon or [])] for polygon in list(lane_polygons or [])],
+        "detections": [_preview_detection_payload(detection) for detection in list(detections or [])],
+    }
 
 
 def _draw_text_panel(frame, lines, *, top_left=(12, 12), fg_color=(240, 240, 240), bg_color=(12, 16, 24)):
@@ -480,6 +510,7 @@ def process_video(
     timestamp_token = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     output_video_path = output_dir / f"{timestamp_token}_{video_path.stem}_processed.mp4"
     output_preview_path = preview_dir / f"{timestamp_token}_{video_path.stem}_preview.jpg"
+    preview_metadata_path = preview_dir / f"{timestamp_token}_{video_path.stem}_preview_frames.jsonl"
 
     input_fps = float(info.fps) if float(info.fps) > 1e-6 else 10.0
     violation_plate_window_frames = _violation_plate_window_frames(info.fps)
@@ -516,11 +547,19 @@ def process_video(
     track_plate_ocr_state: dict[str, dict] = {}
     violating_track_meta: dict[str, dict] = {}
     preview_written = False
+    preview_metadata_handle = None
     lane_sources = set()
+    representative_lane_polygons = []
+    representative_lane_frame_index = None
     run_started_at = time.monotonic()
     plate_min_confidence = float(getattr(plate_recognizer, "min_confidence", 0.0) or 0.0)
     total_plate_ocr_attempt_count = 0
     total_plate_ocr_success_count = 0
+
+    try:
+        preview_metadata_handle = preview_metadata_path.open("w", encoding="utf-8")
+    except Exception:
+        preview_metadata_handle = None
 
     try:
         for frame_data in iter_video_frames(video_path, stride=frame_stride, max_frames=max_frames):
@@ -540,6 +579,16 @@ def process_video(
                 timestamp_s=frame_data.timestamp_s,
                 render_output=False,
             )
+            if (
+                not representative_lane_polygons
+                and frame_result.get("lane_polygons")
+                and str(frame_result.get("lane_source", "") or "").strip().lower() == "auto"
+            ):
+                representative_lane_polygons = [
+                    [list(point) for point in list(polygon or [])]
+                    for polygon in list(frame_result.get("lane_polygons", []) or [])
+                ]
+                representative_lane_frame_index = int(frame_data.frame_index)
             tracked_detections = tracker.update(
                 frame_result.get("detections", []),
                 frame_index=frame_data.frame_index,
@@ -753,6 +802,23 @@ def process_video(
                 current_violation_count=violation_count,
             )
 
+            if preview_metadata_handle is not None:
+                try:
+                    preview_payload = _preview_frame_payload(
+                        processed_frame_count,
+                        int(frame_data.frame_index),
+                        frame_data.timestamp_s,
+                        frame_result.get("lane_polygons", []),
+                        tracked_detections,
+                    )
+                    preview_metadata_handle.write(json.dumps(preview_payload, ensure_ascii=False) + "\n")
+                except Exception:
+                    try:
+                        preview_metadata_handle.close()
+                    except Exception:
+                        pass
+                    preview_metadata_handle = None
+
             writer.write(rendered)
             processed_frame_count += 1
             lane_sources.add(str(frame_result.get("lane_source", "auto")))
@@ -782,6 +848,7 @@ def process_video(
                     "original_path": str(video_path),
                     "processed_video_path": str(output_video_path),
                     "preview_frame_path": str(output_preview_path) if output_preview_path.exists() else "",
+                    "preview_metadata_path": str(preview_metadata_path) if preview_metadata_handle is not None else "",
                     "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     "frame_count": int(info.frame_count),
                     "processed_frame_count": int(processed_frame_count),
@@ -842,9 +909,19 @@ def process_video(
         writer.release()
     except InterruptedError:
         writer.release()
+        if preview_metadata_handle is not None:
+            try:
+                preview_metadata_handle.close()
+            except Exception:
+                pass
         raise
     except Exception:
         writer.release()
+        if preview_metadata_handle is not None:
+            try:
+                preview_metadata_handle.close()
+            except Exception:
+                pass
         raise
 
     if processed_frame_count == 0:
@@ -907,11 +984,18 @@ def process_video(
     )
     unread_violating_track_count = max(0, len(violating_track_meta) - len(violating_track_plates))
 
+    if preview_metadata_handle is not None:
+        try:
+            preview_metadata_handle.close()
+        except Exception:
+            pass
+
     return {
         "media_type": "video",
         "original_path": str(video_path),
         "processed_video_path": str(output_video_path),
         "preview_frame_path": str(output_preview_path) if output_preview_path.exists() else "",
+        "preview_metadata_path": str(preview_metadata_path) if preview_metadata_path.exists() else "",
         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "frame_count": int(info.frame_count),
         "processed_frame_count": int(processed_frame_count),
@@ -927,6 +1011,8 @@ def process_video(
         "violation_plate_window_frames": int(violation_plate_window_frames),
         "violation_plate_window_s": float(DEFAULT_VIOLATION_PLATE_WINDOW_S),
         "lane_source": lane_source,
+        "lane_polygons": representative_lane_polygons,
+        "lane_polygon_frame_index": representative_lane_frame_index,
         "count_line_source": count_line_source or "none",
         "count_line_count": int(len(count_rules)),
         "count_line_names": [rule.name for rule in count_rules],

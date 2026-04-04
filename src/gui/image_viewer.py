@@ -39,10 +39,6 @@ class _ImageViewerView(QtWidgets.QGraphicsView):
             self._owner.finish_region_direction_drawing()
             event.accept()
             return
-        if self._owner.is_manual_roi_drawing() and event.button() == QtCore.Qt.LeftButton:
-            self._owner.finish_manual_roi_drawing()
-            event.accept()
-            return
         if self._owner._has_pixmap() and event.button() == QtCore.Qt.LeftButton:
             self._owner.fit_to_window()
             event.accept()
@@ -62,10 +58,6 @@ class _ImageViewerView(QtWidgets.QGraphicsView):
                 event.accept()
                 return
         if self._owner.is_manual_roi_drawing():
-            if event.button() == QtCore.Qt.RightButton:
-                self._owner.finish_manual_roi_drawing()
-                event.accept()
-                return
             if event.button() == QtCore.Qt.LeftButton:
                 self._press_pos = self._event_view_pos(event)
                 event.accept()
@@ -141,6 +133,7 @@ class ImageViewer(QtWidgets.QFrame):
     hover_left = QtCore.pyqtSignal() if hasattr(QtCore, "pyqtSignal") else QtCore.Signal()
     manual_roi_changed = QtCore.pyqtSignal(object) if hasattr(QtCore, "pyqtSignal") else QtCore.Signal(object)
     manual_roi_finished = QtCore.pyqtSignal(object) if hasattr(QtCore, "pyqtSignal") else QtCore.Signal(object)
+    manual_roi_selection_changed = QtCore.pyqtSignal(object) if hasattr(QtCore, "pyqtSignal") else QtCore.Signal(object)
     manual_roi_drawing_changed = QtCore.pyqtSignal(bool) if hasattr(QtCore, "pyqtSignal") else QtCore.Signal(bool)
     manual_roi_context_requested = (
         QtCore.pyqtSignal(int, object, object)
@@ -173,7 +166,10 @@ class ImageViewer(QtWidgets.QFrame):
 
         self._placeholder = QtWidgets.QLabel(placeholder_text)
         self._placeholder.setAlignment(QtCore.Qt.AlignCenter)
-        self._placeholder.setStyleSheet("color:#6b7280;font-family:Consolas;")
+        self._placeholder.setWordWrap(True)
+        self._placeholder.setTextFormat(QtCore.Qt.RichText)
+        self._placeholder.setMargin(32)
+        self._placeholder.setStyleSheet("color:#94a3b8;font-size:13px;line-height:1.7;")
 
         self._scene = QtWidgets.QGraphicsScene(self)
         self._pix_item = QtWidgets.QGraphicsPixmapItem()
@@ -188,9 +184,10 @@ class ImageViewer(QtWidgets.QFrame):
 
         self._selected_polygon_item = QtWidgets.QGraphicsPathItem()
         self._selected_polygon_item.setZValue(10.4)
-        selected_pen = QtGui.QPen(QtCore.Qt.NoPen)
+        selected_pen = QtGui.QPen(QtGui.QColor(59, 130, 246), 3.0)
+        selected_pen.setCosmetic(True)
         self._selected_polygon_item.setPen(selected_pen)
-        self._selected_polygon_item.setBrush(QtGui.QBrush(QtGui.QColor(250, 204, 21, 88)))
+        self._selected_polygon_item.setBrush(QtCore.Qt.NoBrush)
         self._scene.addItem(self._selected_polygon_item)
 
         self._draft_polygon_item = QtWidgets.QGraphicsPolygonItem()
@@ -255,6 +252,22 @@ class ImageViewer(QtWidgets.QFrame):
 
     def set_placeholder_text(self, text: str):
         self._placeholder.setText(text)
+
+    def _set_selected_manual_roi_index(self, index) -> bool:
+        old_value = self.selected_manual_roi_index()
+        new_value = None
+        if index is not None:
+            try:
+                candidate = int(index)
+            except Exception:
+                candidate = None
+            if candidate is not None and 0 <= candidate < len(self._manual_roi_regions):
+                new_value = candidate
+        self._selected_manual_roi_index = new_value
+        if old_value != new_value:
+            self.manual_roi_selection_changed.emit(new_value)
+            return True
+        return False
 
     def clear(self, placeholder_text: Optional[str] = None):
         if placeholder_text is not None:
@@ -373,10 +386,9 @@ class ImageViewer(QtWidgets.QFrame):
             return int(self._selected_manual_roi_index)
         return None
 
-    def set_manual_roi(self, points, *, emit_signal: bool = False):
+    def set_manual_roi(self, points, *, emit_signal: bool = False, selected_index=None):
         normalized_regions = self._normalize_regions(points)
         self._manual_roi_regions = normalized_regions
-        self._selected_manual_roi_index = None
         self._region_direction_lines = self._normalize_direction_lines(self._region_direction_lines, normalized_regions)
         self._draft_roi_points = []
         self._draft_hover_point = None
@@ -386,6 +398,7 @@ class ImageViewer(QtWidgets.QFrame):
         self._direction_draft_points = []
         self._direction_hover_point = None
         self._set_manual_roi_cursor(False)
+        self._set_selected_manual_roi_index(selected_index)
         self._refresh_manual_roi_items()
         if emit_signal:
             self.manual_roi_changed.emit(self.manual_roi_regions())
@@ -394,7 +407,7 @@ class ImageViewer(QtWidgets.QFrame):
 
     def clear_manual_roi(self, *, emit_signal: bool = True):
         self._manual_roi_regions = []
-        self._selected_manual_roi_index = None
+        self._set_selected_manual_roi_index(None)
         self._region_direction_lines = []
         self._draft_roi_points = []
         self._draft_hover_point = None
@@ -419,7 +432,7 @@ class ImageViewer(QtWidgets.QFrame):
             self.cancel_region_direction_drawing()
         if clear_existing:
             self._manual_roi_regions = []
-            self._selected_manual_roi_index = None
+            self._set_selected_manual_roi_index(None)
             self._region_direction_lines = []
         self._draft_roi_points = []
         self._draft_hover_point = None
@@ -434,7 +447,7 @@ class ImageViewer(QtWidgets.QFrame):
         region_points = self._normalize_points(self._draft_roi_points)
         self._manual_roi_regions.append(region_points)
         self._region_direction_lines.append([])
-        self._selected_manual_roi_index = len(self._manual_roi_regions) - 1
+        self._set_selected_manual_roi_index(len(self._manual_roi_regions) - 1)
         self._draft_roi_points = []
         self._draft_hover_point = None
         self._manual_roi_drawing = False
@@ -456,6 +469,23 @@ class ImageViewer(QtWidgets.QFrame):
         self._refresh_manual_roi_items()
         self.manual_roi_drawing_changed.emit(False)
 
+    def confirm_cancel_manual_roi_drawing(self) -> bool:
+        if not self._manual_roi_drawing:
+            return False
+        if not self._draft_roi_points:
+            self.cancel_manual_roi_drawing()
+            return True
+        reply = QtWidgets.QMessageBox.question(
+            self,
+            "取消当前框选",
+            "当前区域还没完成，确定要取消这次框选吗？",
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+            QtWidgets.QMessageBox.No,
+        )
+        if reply == QtWidgets.QMessageBox.Yes:
+            self.cancel_manual_roi_drawing()
+        return True
+
     def delete_selected_manual_roi(self, *, emit_signal: bool = True):
         selected_index = self.selected_manual_roi_index()
         if selected_index is None:
@@ -464,9 +494,9 @@ class ImageViewer(QtWidgets.QFrame):
         if 0 <= selected_index < len(self._region_direction_lines):
             self._region_direction_lines.pop(selected_index)
         if not self._manual_roi_regions:
-            self._selected_manual_roi_index = None
+            self._set_selected_manual_roi_index(None)
         else:
-            self._selected_manual_roi_index = min(selected_index, len(self._manual_roi_regions) - 1)
+            self._set_selected_manual_roi_index(min(selected_index, len(self._manual_roi_regions) - 1))
         self._refresh_manual_roi_items()
         if emit_signal:
             self.manual_roi_changed.emit(self.manual_roi_regions())
@@ -495,7 +525,7 @@ class ImageViewer(QtWidgets.QFrame):
             return
         if self._manual_roi_drawing:
             self.cancel_manual_roi_drawing()
-        self._selected_manual_roi_index = int(region_index)
+        self._set_selected_manual_roi_index(int(region_index))
         self._direction_region_index = int(region_index)
         self._direction_draft_points = []
         self._direction_hover_point = None
@@ -534,6 +564,23 @@ class ImageViewer(QtWidgets.QFrame):
         self._set_manual_roi_cursor(False)
         self._refresh_manual_roi_items()
         self.region_direction_drawing_changed.emit(False)
+
+    def confirm_cancel_region_direction_drawing(self) -> bool:
+        if not self._direction_drawing:
+            return False
+        if not self._direction_draft_points:
+            self.cancel_region_direction_drawing()
+            return True
+        reply = QtWidgets.QMessageBox.question(
+            self,
+            "取消方向设置",
+            "允许方向还没设置完成，确定要取消吗？",
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+            QtWidgets.QMessageBox.No,
+        )
+        if reply == QtWidgets.QMessageBox.Yes:
+            self.cancel_region_direction_drawing()
+        return True
 
     def _is_point_pair(self, value) -> bool:
         try:
@@ -617,19 +664,13 @@ class ImageViewer(QtWidgets.QFrame):
     def _handle_key_press(self, event) -> bool:
         key = int(event.key())
         if key == int(QtCore.Qt.Key_Escape) and self._direction_drawing:
-            self.cancel_region_direction_drawing()
+            self.confirm_cancel_region_direction_drawing()
             return True
         if key == int(QtCore.Qt.Key_Escape) and self._manual_roi_drawing:
-            self.cancel_manual_roi_drawing()
+            self.confirm_cancel_manual_roi_drawing()
             return True
         if key in {int(QtCore.Qt.Key_Delete), int(QtCore.Qt.Key_Backspace)}:
-            if self._manual_roi_drawing and self._draft_roi_points:
-                self._draft_roi_points.pop()
-                self._refresh_manual_roi_items()
-                return True
-            if self._direction_drawing and self._direction_draft_points:
-                self._direction_draft_points.pop()
-                self._refresh_manual_roi_items()
+            if self._manual_roi_drawing or self._direction_drawing:
                 return True
             if self.delete_selected_manual_roi() is not None:
                 return True
@@ -647,13 +688,9 @@ class ImageViewer(QtWidgets.QFrame):
         hit_index = self._region_hit_index(scene_point)
         if hit_index is not None:
             if hit_index != self._selected_manual_roi_index:
-                self._selected_manual_roi_index = hit_index
+                self._set_selected_manual_roi_index(hit_index)
                 self._refresh_manual_roi_items()
             return
-
-        if self._selected_manual_roi_index is not None:
-            self._selected_manual_roi_index = None
-            self._refresh_manual_roi_items()
 
         scene_pos = self._view.mapToScene(view_pos)
         rect = self._pix_item.boundingRect()
@@ -671,7 +708,7 @@ class ImageViewer(QtWidgets.QFrame):
         if hit_index is None:
             return
         if hit_index != self._selected_manual_roi_index:
-            self._selected_manual_roi_index = hit_index
+            self._set_selected_manual_roi_index(hit_index)
             self._refresh_manual_roi_items()
         global_point = None
         if hasattr(event, "globalPosition"):

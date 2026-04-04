@@ -1,4 +1,5 @@
 ﻿import hashlib
+import json
 import math
 import time
 import uuid
@@ -11,7 +12,7 @@ try:
     from .qt import QtCore, QtGui, QtWidgets
     from .viewer_panel import ViewerPanel
     from .workspace_panel import WorkspacePanel
-    from .violations_table import ViolationsTable
+    from .violations_table import RegionRulesPanel
     from .processing_worker import ProcessingWorker
     from .video_processing_worker import VideoProcessingWorker
     from ..services.renderer import render_result
@@ -22,7 +23,7 @@ except Exception:
         from gui.qt import QtCore, QtGui, QtWidgets
         from gui.viewer_panel import ViewerPanel
         from gui.workspace_panel import WorkspacePanel
-        from gui.violations_table import ViolationsTable
+        from gui.violations_table import RegionRulesPanel
         from gui.processing_worker import ProcessingWorker
         from gui.video_processing_worker import VideoProcessingWorker
         from services.renderer import render_result
@@ -32,7 +33,7 @@ except Exception:
         from qt import QtCore, QtGui, QtWidgets
         from viewer_panel import ViewerPanel
         from workspace_panel import WorkspacePanel
-        from violations_table import ViolationsTable
+        from violations_table import RegionRulesPanel
         from processing_worker import ProcessingWorker
         from video_processing_worker import VideoProcessingWorker
         from services.renderer import render_result
@@ -60,9 +61,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self._selected_detection_index = None
         self._manual_roi_cache = {}
         self._video_info_cache = {}
+        self._video_preview_metadata_cache = {}
         self._video_progress_log_state = {}
         self._video_session = None
         self._video_playback = None
+        self._notice_timer = QtCore.QTimer(self)
+        self._notice_timer.setSingleShot(True)
+        self._notice_timer.timeout.connect(self._hide_notice)
         self._video_play_timer = QtCore.QTimer(self)
         self._video_play_timer.timeout.connect(self._on_video_playback_tick)
 
@@ -72,69 +77,73 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _build_ui(self):
         self.topbar = QtWidgets.QFrame()
-        self.topbar.setFixedHeight(72)
         self.topbar.setStyleSheet("background:#111827;border-bottom:1px solid #243041;")
+        top_root = QtWidgets.QVBoxLayout(self.topbar)
+        top_root.setContentsMargins(18, 14, 18, 12)
+        top_root.setSpacing(10)
 
-        title = QtWidgets.QLabel("TrafficScan")
-        title.setStyleSheet("color:#f8fafc;font-size:18px;font-weight:600;")
-        subtitle = QtWidgets.QLabel("Deep3DBox + Manual ROI + Sequence Roadmap")
-        subtitle.setStyleSheet("color:#94a3b8;font-size:12px;")
-        badge = QtWidgets.QLabel("3D Detector: Deep3DBox")
-        badge.setStyleSheet(
-            "color:#bfdbfe;background:#1d4ed8;border:1px solid #1d4ed8;border-radius:10px;padding:4px 10px;"
+        self.btn_start_analysis = QtWidgets.QPushButton("开始分析")
+        self.btn_start_analysis.setStyleSheet(
+            "QPushButton{background:#2563eb;border:1px solid #2563eb;color:#ffffff;padding:9px 16px;border-radius:10px;font-size:13px;font-weight:600;}"
+            "QPushButton:hover{background:#1d4ed8;}"
+            "QPushButton:disabled{background:#1e293b;border-color:#334155;color:#94a3b8;}"
         )
 
-        title_box = QtWidgets.QVBoxLayout()
-        title_box.setContentsMargins(0, 0, 0, 0)
-        title_box.setSpacing(3)
-        title_box.addWidget(title)
-        title_box.addWidget(subtitle)
-
-        self.btn_run_selected = QtWidgets.QPushButton("Run Selected")
-        self.btn_run_all = QtWidgets.QPushButton("Run All")
-        self.btn_run_selected.setStyleSheet(
-            "QPushButton{background:#1f2937;border:1px solid #334155;color:#e5e7eb;padding:8px 14px;border-radius:8px;}"
+        self.run_feedback = QtWidgets.QFrame()
+        self.run_feedback.setVisible(True)
+        self.run_feedback.setStyleSheet(
+            "QFrame{background:#0f172a;border:1px solid #243041;border-radius:12px;}"
+            "QLabel{color:#dbe4ee;font-size:12px;}"
+            "QProgressBar{background:#111827;border:1px solid #1f2937;border-radius:8px;height:10px;text-align:center;}"
+            "QProgressBar::chunk{background:#2563eb;border-radius:7px;}"
+            "QPushButton{background:#1f2937;border:1px solid #334155;color:#e5e7eb;padding:7px 12px;border-radius:9px;}"
             "QPushButton:hover{background:#273449;}"
         )
-        self.btn_run_all.setStyleSheet(
-            "QPushButton{background:#2563eb;border:1px solid #2563eb;color:#ffffff;padding:8px 14px;border-radius:8px;font-weight:600;}"
-            "QPushButton:hover{background:#1d4ed8;}"
+        feedback_root = QtWidgets.QHBoxLayout(self.run_feedback)
+        feedback_root.setContentsMargins(12, 10, 12, 10)
+        feedback_root.setSpacing(10)
+        self.run_feedback_label = QtWidgets.QLabel("")
+        self.run_feedback_bar = QtWidgets.QProgressBar()
+        self.run_feedback_bar.setTextVisible(True)
+        self.run_feedback_bar.setRange(0, 100)
+        self.run_feedback_bar.setValue(0)
+        self.btn_stop_run = QtWidgets.QPushButton("停止")
+        feedback_root.addWidget(self.run_feedback_label, 0)
+        feedback_root.addWidget(self.run_feedback_bar, 1)
+        feedback_root.addWidget(self.btn_start_analysis, 0)
+        feedback_root.addWidget(self.btn_stop_run, 0)
+        top_root.addWidget(self.run_feedback, 0)
+
+        self.notice_bar = QtWidgets.QFrame()
+        self.notice_bar.setVisible(False)
+        self.notice_bar.setStyleSheet(
+            "QFrame{background:#0f172a;border:1px solid #243041;border-radius:12px;}"
+            "QLabel{color:#dbe4ee;font-size:12px;}"
         )
-
-        left = QtWidgets.QHBoxLayout()
-        left.setContentsMargins(16, 10, 16, 10)
-        left.setSpacing(12)
-        left.addLayout(title_box)
-        left.addWidget(badge)
-        left.addStretch(1)
-
-        right = QtWidgets.QHBoxLayout()
-        right.setContentsMargins(0, 0, 16, 0)
-        right.setSpacing(12)
-        right.addWidget(self.btn_run_selected)
-        right.addWidget(self.btn_run_all)
-
-        bar = QtWidgets.QHBoxLayout(self.topbar)
-        bar.setContentsMargins(0, 0, 0, 0)
-        bar.addLayout(left, 1)
-        bar.addLayout(right, 0)
+        notice_root = QtWidgets.QHBoxLayout(self.notice_bar)
+        notice_root.setContentsMargins(12, 10, 12, 10)
+        notice_root.setSpacing(0)
+        self.notice_label = QtWidgets.QLabel("")
+        self.notice_label.setWordWrap(True)
+        notice_root.addWidget(self.notice_label, 1)
+        top_root.addWidget(self.notice_bar, 0)
 
         self.workspace = WorkspacePanel()
         self.viewer_panel = ViewerPanel()
-        self.violations = ViolationsTable()
+        self.region_rules = RegionRulesPanel()
 
         self.splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
         self.splitter.setHandleWidth(6)
         self.splitter.addWidget(self.workspace)
         self.splitter.addWidget(self.viewer_panel)
-        self.splitter.addWidget(self.violations)
+        self.splitter.addWidget(self.region_rules)
         self.splitter.setCollapsible(0, True)
         self.splitter.setCollapsible(1, False)
         self.splitter.setCollapsible(2, True)
         self.splitter.setStretchFactor(0, 0)
         self.splitter.setStretchFactor(1, 1)
         self.splitter.setStretchFactor(2, 0)
-        self.splitter.setSizes([330, 940, 390])
+        self.splitter.setSizes([320, 980, 340])
 
         central = QtWidgets.QWidget()
         root = QtWidgets.QVBoxLayout(central)
@@ -143,46 +152,108 @@ class MainWindow(QtWidgets.QMainWindow):
         root.addWidget(self.topbar, 0)
         root.addWidget(self.splitter, 1)
         self.setCentralWidget(central)
+        self.viewer_panel.show_empty_state()
+        self.region_rules.show_no_media_selected()
+        self._set_run_feedback(visible=False, text="等待分析", value=0, maximum=100, progress_text="0%")
+        self._refresh_primary_actions()
 
     def _connect_signals(self):
-        self.btn_run_selected.clicked.connect(self._run_selected)
-        self.btn_run_all.clicked.connect(self._run_all)
+        self.btn_start_analysis.clicked.connect(self._run_selected)
+        self.btn_stop_run.clicked.connect(self._request_stop_current_run)
 
         self.workspace.file_selected.connect(self._on_workspace_selected)
         self.workspace.files_added.connect(self._on_workspace_added)
+        self.workspace.content_changed.connect(self._on_workspace_content_changed)
+        self.workspace.selection_cleared.connect(self._on_workspace_selection_cleared)
         self.workspace.unsupported_dropped.connect(self._on_unsupported_dropped)
 
         self.splitter.splitterMoved.connect(lambda *_: self._schedule_render_preview())
         self.viewer_panel.resized.connect(self._schedule_render_preview)
-        self.viewer_panel.layer_toggled.connect(self._on_layer_toggled)
         self.viewer_panel.image_clicked.connect(self._on_viewer_image_clicked)
         self.viewer_panel.image_hovered.connect(self._on_viewer_image_hovered)
         self.viewer_panel.image_hover_left.connect(self._on_viewer_image_hover_left)
+        self.viewer_panel.layer_toggled.connect(self._on_layer_toggled)
         self.viewer_panel.manual_roi_start_requested.connect(self._on_manual_roi_start_requested)
         self.viewer_panel.manual_roi_finish_requested.connect(self._on_manual_roi_finish_requested)
         self.viewer_panel.manual_roi_clear_requested.connect(self._on_manual_roi_clear_requested)
-        self.viewer_panel.manual_roi_save_requested.connect(self._on_manual_roi_save_requested)
         self.viewer_panel.manual_roi_changed.connect(self._on_manual_roi_changed)
         self.viewer_panel.manual_roi_finished.connect(self._on_manual_roi_finished)
+        self.viewer_panel.manual_roi_selection_changed.connect(self._on_manual_roi_selection_changed)
         self.viewer_panel.manual_roi_context_requested.connect(self._on_manual_roi_context_requested)
         self.viewer_panel.region_direction_finished.connect(self._on_region_direction_finished)
         self.viewer_panel.video_play_toggled.connect(self._on_video_play_toggled)
         self.viewer_panel.video_seek_requested.connect(self._on_video_seek_requested)
         self.viewer_panel.video_step_requested.connect(self._on_video_step_requested)
+        self.region_rules.rule_toggled.connect(self._on_region_rule_toggled)
+        self.region_rules.set_direction_requested.connect(self._on_set_direction_requested)
+        self.region_rules.clear_direction_requested.connect(self._on_clear_direction_requested)
+        self.region_rules.frame_jump_requested.connect(self._on_violation_frame_jump_requested)
 
     def _on_workspace_added(self, added: int):
         if added:
+            self._refresh_primary_actions()
+            self._show_notice("success", f"已导入 {added} 个素材", duration_ms=2200)
             self._log("success", f"Added {added} media file(s)")
 
+    def _on_workspace_content_changed(self, _count: int):
+        self._refresh_primary_actions()
+
     def _on_unsupported_dropped(self):
+        self._show_notice("warning", "没有找到支持的图片或视频文件")
         self._log("warning", "No supported images or videos found")
+
+    def _on_workspace_selection_cleared(self):
+        self._hover_detection_index = None
+        self._selected_detection_index = None
+        self._close_video_session()
+        self.viewer_panel.show_empty_state()
+        self.region_rules.show_no_media_selected()
+        self._refresh_primary_actions()
 
     def _on_workspace_selected(self, file_path: str):
         self._hover_detection_index = None
         self._selected_detection_index = None
         self._set_preview(file_path)
         self._show_details_for_path(file_path)
+        self._refresh_primary_actions()
         self._log("info", f"Selected {Path(file_path).name}")
+
+    def _refresh_primary_actions(self):
+        has_targets = len(self.workspace.checked_paths()) > 0
+        self.btn_start_analysis.setEnabled(has_targets and not self._is_running)
+
+    def _show_notice(self, level: str, message: str, *, duration_ms: int = 2600):
+        self.notice_bar.setVisible(False)
+        anchor = self.topbar.mapToGlobal(
+            QtCore.QPoint(max(24, self.topbar.width() // 2 - 40), self.topbar.height() - 4)
+        )
+        QtWidgets.QToolTip.showText(anchor, str(message or ""), self, self.rect(), max(1200, int(duration_ms)))
+        self._notice_timer.start(max(1200, int(duration_ms)))
+
+    def _hide_notice(self):
+        QtWidgets.QToolTip.hideText()
+        self.notice_bar.setVisible(False)
+
+    def _set_run_feedback(self, *, visible: bool, text: str = "", value: int = 0, maximum: int = 100, progress_text: str = ""):
+        self.run_feedback.setVisible(True)
+        if not visible:
+            self.run_feedback_label.setText(str(text or "等待分析"))
+            self.run_feedback_bar.setRange(0, 100)
+            self.run_feedback_bar.setValue(0)
+            self.run_feedback_bar.setFormat(str(progress_text or "0%"))
+            self.btn_stop_run.setEnabled(False)
+            return
+        maximum = max(1, int(maximum))
+        value = max(0, min(int(value), maximum))
+        self.run_feedback_label.setText(str(text or "正在分析"))
+        self.run_feedback_bar.setRange(0, maximum)
+        self.run_feedback_bar.setValue(value)
+        self.btn_stop_run.setEnabled(bool(self._is_running))
+        if progress_text:
+            self.run_feedback_bar.setFormat(str(progress_text))
+        else:
+            percent = int(round((float(value) / float(maximum)) * 100.0))
+            self.run_feedback_bar.setFormat(f"{percent}%")
 
     def _set_preview(self, file_path: str):
         key = self._norm_path(file_path)
@@ -200,7 +271,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _set_video_preview(self, file_path: str, *, result: dict | None = None):
         item_path = self._norm_path(file_path)
-        source_path, source_label, info = self._video_preview_source_for(file_path, result=result)
+        source_path, source_label, info, frame_records = self._video_preview_source_for(file_path, result=result)
         source_key = self._norm_path(source_path)
         reuse_state = (
             self._video_playback is not None
@@ -216,13 +287,14 @@ class MainWindow(QtWidgets.QMainWindow):
             self._close_video_session()
 
         self._ensure_video_session(source_path, info)
-        total_frames = max(1, int(getattr(info, "frame_count", 0) or 0))
+        total_frames = max(1, len(frame_records) if frame_records else int(getattr(info, "frame_count", 0) or 0))
         current_frame = max(0, min(current_frame, total_frames - 1))
         self._video_playback = {
             "item_path": item_path,
             "source_path": source_key,
             "source_label": source_label,
             "info": info,
+            "frame_records": list(frame_records or []),
             "current_frame_index": current_frame,
             "is_playing": False,
         }
@@ -230,17 +302,49 @@ class MainWindow(QtWidgets.QMainWindow):
         if was_playing:
             self._set_video_playing(True)
 
+    def _load_video_preview_metadata(self, metadata_path: str):
+        normalized = self._norm_path(metadata_path)
+        cached = self._video_preview_metadata_cache.get(normalized)
+        if cached is not None:
+            return cached
+        records = []
+        path_obj = Path(metadata_path)
+        if not path_obj.exists():
+            self._video_preview_metadata_cache[normalized] = records
+            return records
+        try:
+            with path_obj.open("r", encoding="utf-8") as handle:
+                for line in handle:
+                    line = str(line or "").strip()
+                    if not line:
+                        continue
+                    try:
+                        payload = json.loads(line)
+                    except Exception:
+                        continue
+                    if isinstance(payload, dict):
+                        records.append(payload)
+        except Exception as exc:
+            self._log("warning", f"Failed to load preview metadata {path_obj.name}: {exc}")
+        self._video_preview_metadata_cache[normalized] = records
+        return records
+
     def _video_preview_source_for(self, file_path: str, *, result: dict | None = None):
         source_path = self._norm_path(file_path)
         source_label = "Preview: original video"
+        frame_records = []
         if result and result.get("media_type") == "video":
-            processed_path = str(result.get("processed_video_path") or "").strip()
+            metadata_path = str(result.get("preview_metadata_path", "") or "").strip()
             status = str(result.get("status", "") or "").strip().lower()
-            if processed_path and status == "processed" and Path(processed_path).exists():
+            if metadata_path and status == "processed" and Path(metadata_path).exists():
+                source_label = "Preview: interactive overlay"
+                frame_records = self._load_video_preview_metadata(metadata_path)
+            processed_path = str(result.get("processed_video_path") or "").strip()
+            if not frame_records and processed_path and status == "processed" and Path(processed_path).exists():
                 source_path = self._norm_path(processed_path)
                 source_label = "Preview: processed result"
         info = self._load_video_info(source_path)
-        return source_path, source_label, info
+        return source_path, source_label, info, frame_records
 
     def _ensure_video_session(self, source_path: str, info):
         normalized_source = self._norm_path(source_path)
@@ -262,6 +366,27 @@ class MainWindow(QtWidgets.QMainWindow):
         self._video_playback = None
         self.viewer_panel.set_video_playback_state(visible=False)
 
+    def _video_playback_records(self):
+        if not self._video_playback:
+            return []
+        return list(self._video_playback.get("frame_records", []) or [])
+
+    def _video_playback_total_frames(self) -> int:
+        records = self._video_playback_records()
+        if records:
+            return max(1, len(records))
+        if not self._video_playback:
+            return 0
+        info = self._video_playback.get("info")
+        return max(1, int(getattr(info, "frame_count", 0) or 0))
+
+    def _video_playback_record(self, frame_index: int):
+        records = self._video_playback_records()
+        if not records:
+            return None
+        target = max(0, min(int(frame_index), len(records) - 1))
+        return records[target]
+
     def _format_video_clock(self, seconds) -> str:
         value = float(seconds or 0.0)
         if not math.isfinite(value) or value < 0.0:
@@ -275,6 +400,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _video_playback_interval_ms(self, info) -> int:
         fps = float(getattr(info, "fps", 0.0) or 0.0)
+        if self._video_playback_records():
+            item_path = self._norm_path(str(self._video_playback.get("item_path", "") or ""))
+            result = self._results_by_path.get(item_path, {})
+            fps = float(result.get("output_fps", fps) or fps)
         if fps <= 1e-6:
             preview_fps = 6.0
         else:
@@ -284,8 +413,13 @@ class MainWindow(QtWidgets.QMainWindow):
     def _video_position_text(self, info, current_frame: int, total_frames: int) -> str:
         total_frames = max(1, int(total_frames))
         current_frame = max(0, min(int(current_frame), total_frames - 1))
+        record = self._video_playback_record(current_frame)
         fps = float(getattr(info, "fps", 0.0) or 0.0)
-        current_s = (float(current_frame) / fps) if fps > 1e-6 else 0.0
+        current_s = (
+            float(record.get("timestamp_s", 0.0) or 0.0)
+            if record and record.get("timestamp_s") is not None
+            else ((float(current_frame) / fps) if fps > 1e-6 else 0.0)
+        )
         duration_s = float(getattr(info, "duration_s", 0.0) or 0.0)
         return f"Frame {current_frame + 1}/{total_frames} | {self._format_video_clock(current_s)} / {self._format_video_clock(duration_s)}"
 
@@ -294,11 +428,11 @@ class MainWindow(QtWidgets.QMainWindow):
             self.viewer_panel.set_video_playback_state(visible=False)
             return
         info = self._video_playback.get("info")
-        total_frames = max(1, int(getattr(info, "frame_count", 0) or 0))
+        total_frames = self._video_playback_total_frames()
         current_frame = max(0, min(int(self._video_playback.get("current_frame_index", 0) or 0), total_frames - 1))
         fps = float(getattr(info, "fps", 0.0) or 0.0)
         preview_fps = min(fps, 12.0) if fps > 1e-6 else 6.0
-        hint_text = f"Frame preview playback is capped at {preview_fps:.1f} fps"
+        hint_text = "可实时切换预览图层" if self._video_playback_records() else f"Frame preview playback is capped at {preview_fps:.1f} fps"
         self.viewer_panel.set_video_playback_state(
             visible=True,
             is_playing=bool(self._video_playback.get("is_playing", False)),
@@ -313,10 +447,12 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self._video_playback or self._video_session is None:
             return
         info = self._video_playback.get("info")
-        total_frames = max(1, int(getattr(info, "frame_count", 0) or 0))
+        total_frames = self._video_playback_total_frames()
         target = max(0, min(int(frame_index), total_frames - 1))
+        record = self._video_playback_record(target)
+        source_frame_index = int(record.get("source_frame_index", target) or target) if record else target
         try:
-            frame = self._video_session.read_frame(target)
+            frame = self._video_session.read_frame(source_frame_index)
         except Exception as exc:
             self._log("error", f"Video frame preview failed: {exc}")
             self._set_video_playing(False)
@@ -324,18 +460,56 @@ class MainWindow(QtWidgets.QMainWindow):
         self._video_playback["current_frame_index"] = int(target)
         item_name = Path(self._video_playback.get("item_path", "video")).name
         source_label = str(self._video_playback.get("source_label", "Preview: original video"))
-        short_source = "processed" if "processed" in source_label.lower() else "original"
+        short_source = "overlay" if record else ("processed" if "processed" in source_label.lower() else "original")
         preview_label = f"{item_name} [{short_source} {target + 1}/{total_frames}]"
-        pixmap = self._pixmap_from_bgr(frame)
+        if record:
+            lane_mask = self._build_lane_mask_from_polygons(record.get("lane_polygons", []), frame.shape[:2])
+            rendered = render_result(
+                frame,
+                lane_mask,
+                list(record.get("detections", []) or []),
+                layers=self.viewer_panel.preview_layers_state(),
+                selected_idx=None,
+            )
+            pixmap = self._pixmap_from_bgr(rendered)
+        else:
+            pixmap = self._pixmap_from_bgr(frame)
         self.viewer_panel.set_pixmap(pixmap, label=preview_label, reset_view=reset_view)
         self._update_video_playback_ui()
+
+    def _preview_frame_index_for_current_source(self, frame_index: int) -> int:
+        if not self._video_playback:
+            return int(frame_index)
+        records = self._video_playback_records()
+        if records:
+            target_source = int(frame_index)
+            best_index = 0
+            best_distance = None
+            for index, record in enumerate(records):
+                source_index = int(record.get("source_frame_index", index) or index)
+                distance = abs(source_index - target_source)
+                if best_distance is None or distance < best_distance:
+                    best_distance = distance
+                    best_index = index
+            return int(best_index)
+        target = int(frame_index)
+        source_path = self._norm_path(str(self._video_playback.get("source_path", "") or ""))
+        item_path = self._norm_path(str(self._video_playback.get("item_path", "") or ""))
+        result = self._results_by_path.get(item_path, {})
+        processed_video_path = self._norm_path(str(result.get("processed_video_path", "") or ""))
+        if processed_video_path and source_path == processed_video_path:
+            frame_stride = max(1, int(result.get("frame_stride", 1) or 1))
+            target = int(frame_index) // frame_stride
+        info = self._video_playback.get("info")
+        total_frames = self._video_playback_total_frames()
+        return max(0, min(target, total_frames - 1))
 
     def _set_video_playing(self, playing: bool):
         if not self._video_playback:
             self._video_play_timer.stop()
             self.viewer_panel.set_video_playback_state(visible=False)
             return
-        total_frames = max(1, int(getattr(self._video_playback.get("info"), "frame_count", 0) or 0))
+        total_frames = self._video_playback_total_frames()
         should_play = bool(playing) and total_frames > 1
         if should_play and int(self._video_playback.get("current_frame_index", 0) or 0) >= (total_frames - 1):
             self._set_video_playback_frame(0, reset_view=False)
@@ -351,8 +525,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self._video_playback:
             self._video_play_timer.stop()
             return
-        info = self._video_playback.get("info")
-        total_frames = max(1, int(getattr(info, "frame_count", 0) or 0))
+        total_frames = self._video_playback_total_frames()
         current_frame = int(self._video_playback.get("current_frame_index", 0) or 0)
         if current_frame >= total_frames - 1:
             self._set_video_playing(False)
@@ -375,9 +548,21 @@ class MainWindow(QtWidgets.QMainWindow):
         current_frame = int(self._video_playback.get("current_frame_index", 0) or 0)
         self._set_video_playback_frame(current_frame + int(delta), reset_view=False)
 
-    def _apply_manual_roi_to_viewer(self, file_path: str):
+    def _on_violation_frame_jump_requested(self, frame_index: int):
+        current = self.workspace.selected_path()
+        if not current or not self._is_video_path(current):
+            return
+        result = self._results_by_path.get(self._norm_path(current))
+        if result:
+            self._set_video_preview(current, result=result)
+        self._set_video_playing(False)
+        target = self._preview_frame_index_for_current_source(int(frame_index))
+        self._set_video_playback_frame(target, reset_view=False)
+        self._show_notice("info", f"已跳转到第 {int(frame_index) + 1} 帧", duration_ms=1800)
+
+    def _apply_manual_roi_to_viewer(self, file_path: str, *, selected_index=None):
         entries = self._load_scene_regions(file_path)
-        self.viewer_panel.set_manual_roi([entry["points"] for entry in entries])
+        self.viewer_panel.set_manual_roi([entry["points"] for entry in entries], selected_index=selected_index)
         self.viewer_panel.set_region_direction_lines([entry.get("direction_line", []) for entry in entries])
 
     def _default_region_rule_params(self, rule_type: str) -> dict:
@@ -522,6 +707,32 @@ class MainWindow(QtWidgets.QMainWindow):
             "rule_bindings": bindings,
         }
 
+    def _build_auto_lane_region_entries(self, lane_polygons) -> list:
+        entries = []
+        for index, polygon in enumerate(lane_polygons or []):
+            points = [
+                [float(point[0]), float(point[1])]
+                for point in list(polygon or [])
+                if point is not None and len(point) == 2
+            ]
+            if len(points) < 3:
+                continue
+            entries.append(
+                self._create_region_entry(
+                    points,
+                    index=index,
+                    existing={
+                        "name": f"Auto Emergency Lane {index + 1}",
+                        "region_type": "parking_roi",
+                        "source": "auto",
+                        "enabled": True,
+                        "direction_line": [],
+                        "rule_bindings": [],
+                    },
+                )
+            )
+        return entries
+
     def _normalize_scene_regions(self, entries) -> list:
         normalized_entries = []
         for index, entry in enumerate(entries or []):
@@ -556,11 +767,11 @@ class MainWindow(QtWidgets.QMainWindow):
         ]
 
     def _load_scene_regions(self, file_path: str):
-        scene_key = self._scene_key_for_path(file_path)
-        if scene_key in self._manual_roi_cache:
-            return self._normalize_scene_regions(self._manual_roi_cache[scene_key])
+        region_key = self._region_key_for_path(file_path)
+        if region_key in self._manual_roi_cache:
+            return self._normalize_scene_regions(self._manual_roi_cache[region_key])
 
-        profile_path = self._scene_profile_path_for_path(file_path)
+        profile_path = self._region_profile_path_for_path(file_path)
         entries = []
         if profile_path.exists():
             try:
@@ -574,7 +785,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._log("warning", f"Failed to load scene profile {profile_path.name}: {exc}")
                 entries = []
         normalized_entries = self._normalize_scene_regions(entries)
-        self._manual_roi_cache[scene_key] = normalized_entries
+        self._manual_roi_cache[region_key] = normalized_entries
         return self._normalize_scene_regions(normalized_entries)
 
     def _merge_scene_regions_from_geometry(self, file_path: str, regions, direction_lines=None):
@@ -594,15 +805,15 @@ class MainWindow(QtWidgets.QMainWindow):
         return merged
 
     def _set_cached_scene_regions(self, file_path: str, entries):
-        scene_key = self._scene_key_for_path(file_path)
-        self._manual_roi_cache[scene_key] = self._normalize_scene_regions(entries)
+        region_key = self._region_key_for_path(file_path)
+        self._manual_roi_cache[region_key] = self._normalize_scene_regions(entries)
 
     def _save_scene_regions(self, file_path: str, entries):
-        profile_path = self._scene_profile_path_for_path(file_path)
-        scene_key = self._scene_key_for_path(file_path)
-        folder_name = Path(scene_key).name or "scene"
+        profile_path = self._region_profile_path_for_path(file_path)
+        region_key = self._region_key_for_path(file_path)
+        file_name = Path(file_path).name or "media"
         normalized_entries = self._normalize_scene_regions(entries)
-        self._manual_roi_cache[scene_key] = normalized_entries
+        self._manual_roi_cache[region_key] = normalized_entries
 
         profile = None
         if profile_path.exists():
@@ -613,9 +824,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
         if profile is None:
             profile = SceneProfile(
-                camera_id=folder_name,
+                camera_id=file_name,
                 fps=0.0,
-                source_path=scene_key,
+                source_path=region_key,
                 notes="Manual ROI saved from GUI",
             )
 
@@ -649,8 +860,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
             )
 
-        profile.camera_id = profile.camera_id or folder_name
-        profile.source_path = profile.source_path or scene_key
+        profile.camera_id = profile.camera_id or file_name
+        profile.source_path = profile.source_path or region_key
         if not profile.notes:
             profile.notes = "Manual ROI saved from GUI"
         profile.parking_regions = remaining_regions
@@ -687,6 +898,9 @@ class MainWindow(QtWidgets.QMainWindow):
         current = self.workspace.selected_path()
         if current:
             self._set_preview(current)
+        if key == "preview_mode":
+            self._log("info", f"Preview mode changed: {self.viewer_panel.display_mode_text()}")
+            return
         state_text = "shown" if enabled else "hidden"
         self._log("info", f"Layer changed: {self._layer_name(key)} -> {state_text}")
 
@@ -704,7 +918,7 @@ class MainWindow(QtWidgets.QMainWindow):
             frame,
             lane_mask,
             result.get("detections", []),
-            layers=self.viewer_panel.layers_state(),
+            layers=self.viewer_panel.preview_layers_state(),
             selected_idx=self._active_detection_index(),
         )
         pixmap = self._pixmap_from_bgr(rendered)
@@ -724,6 +938,24 @@ class MainWindow(QtWidgets.QMainWindow):
             cv2.fillPoly(lane_mask, [pts], 255)
         return lane_mask
 
+    def _build_lane_mask_from_polygons(self, polygons, image_hw):
+        h, w = image_hw
+        lane_mask = np.zeros((h, w), dtype=np.uint8)
+        for polygon in polygons or []:
+            pts = np.asarray(polygon, dtype=np.int32)
+            if pts.ndim != 2 or pts.shape[0] < 3 or pts.shape[1] != 2:
+                continue
+            cv2.fillPoly(lane_mask, [pts], 255)
+        return lane_mask
+
+    def _processing_layers_state(self):
+        return {
+            "lane_mask": False,
+            "footprint": True,
+            "boxes_3d": True,
+            "labels": False,
+        }
+
     def _pixmap_from_bgr(self, image):
         arr = np.asarray(image, dtype=np.uint8)
         if arr.ndim != 3 or arr.shape[2] != 3:
@@ -737,6 +969,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _on_manual_roi_start_requested(self):
         current = self.workspace.selected_path()
         if not current:
+            self._show_notice("warning", "请先从左侧选择一个图片或视频")
             self._log("warning", "Select an image or video before drawing a manual ROI")
             return
         if self._video_playback and bool(self._video_playback.get("is_playing", False)):
@@ -749,17 +982,21 @@ class MainWindow(QtWidgets.QMainWindow):
             self._show_details_for_path(current)
             self._log("info", f"Cleared {stale_count} stale result(s) for this scene because the manual ROI is being edited")
         self.viewer_panel.start_manual_roi_drawing(clear_existing=False)
-        self._log("info", "Manual ROI drawing started: left click to add points, right click or double click to finish. Existing regions stay in place.")
+        self._show_notice("info", "左键依次点击，回到起点闭合后自动完成，按 Esc 会提示是否取消", duration_ms=3200)
+        self._log("info", "Manual ROI drawing started: left click to add points and close the polygon by clicking near the starting point.")
 
     def _on_manual_roi_finish_requested(self):
         if not self.viewer_panel.is_manual_roi_drawing():
+            self._show_notice("warning", "当前不在框选状态")
             self._log("warning", "Manual ROI drawing is not active")
             return
         region = self.viewer_panel.finish_manual_roi_drawing()
         if not region or len(region) < 3:
+            self._show_notice("warning", "当前区域至少需要 3 个点")
             self._log("warning", "Manual ROI needs at least 3 points")
             return
         total_regions = len(self.viewer_panel.manual_roi_regions())
+        self._show_notice("success", f"已完成区域框选，当前共 {total_regions} 个区域", duration_ms=2200)
         self._log("success", f"Manual ROI region added with {len(region)} points, total regions={total_regions}")
 
     def _on_manual_roi_changed(self, regions):
@@ -774,6 +1011,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._set_cached_scene_regions(current, merged_entries)
         if self._is_running:
             return
+        self._save_scene_regions(current, merged_entries)
         self._invalidate_results_for_scene(current)
         self._selected_detection_index = None
         self._hover_detection_index = None
@@ -791,18 +1029,68 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self._set_cached_scene_regions(current, merged_entries)
 
+    def _on_manual_roi_selection_changed(self, _region_index):
+        current = self.workspace.selected_path()
+        if current:
+            self._show_details_for_path(current)
+
+    def _on_region_rule_toggled(self, region_index: int, rule_type: str, enabled: bool):
+        current = self.workspace.selected_path()
+        if not current:
+            return
+        updated = self._set_region_rule_enabled(current, int(region_index), str(rule_type), bool(enabled))
+        if updated is None:
+            return
+        if str(rule_type) == "no_wrong_way" and bool(enabled) and len(updated.get("direction_line", [])) != 2:
+            self.viewer_panel.start_region_direction_drawing(int(region_index))
+            self._show_notice("info", "请在选中区域内点击两次设置允许方向", duration_ms=2600)
+        rule_name = {
+            "no_parking": "禁止停车",
+            "no_non_motor": "禁止非机动车",
+            "no_wrong_way": "禁止逆行",
+        }.get(str(rule_type), str(rule_type))
+        self._show_notice("success", f"区域 {int(region_index) + 1}：{rule_name}已{'启用' if enabled else '关闭'}", duration_ms=2200)
+
+    def _on_set_direction_requested(self, region_index: int):
+        current = self.workspace.selected_path()
+        if not current:
+            return
+        entries = self._load_scene_regions(current)
+        if not (0 <= int(region_index) < len(entries)):
+            return
+        self.viewer_panel.start_region_direction_drawing(int(region_index))
+        self._show_notice("info", "请在选中区域内点击两次设置允许方向", duration_ms=2600)
+
+    def _on_clear_direction_requested(self, region_index: int):
+        current = self.workspace.selected_path()
+        if not current:
+            return
+        entries = self._load_scene_regions(current)
+        if not (0 <= int(region_index) < len(entries)):
+            return
+        entries[int(region_index)]["direction_line"] = []
+        self._set_cached_scene_regions(current, entries)
+        self._save_scene_regions(current, entries)
+        self._apply_manual_roi_to_viewer(current, selected_index=region_index)
+        self._show_details_for_path(current)
+        self._show_notice("success", f"区域 {int(region_index) + 1}：已清除允许方向", duration_ms=2200)
+
     def _on_manual_roi_clear_requested(self):
         current = self.workspace.selected_path()
         if not current:
+            self._show_notice("warning", "请先从左侧选择一个图片或视频")
             self._log("warning", "Select an image or video before clearing the manual ROI")
             return
         self.viewer_panel.clear_manual_roi()
         self._set_cached_scene_regions(current, [])
+        self._show_details_for_path(current)
+        self._show_notice("success", "当前场景的区域已清空", duration_ms=2200)
         self._log("info", "All manual ROI regions were cleared from the current scene")
 
     def _on_manual_roi_save_requested(self):
         current = self.workspace.selected_path()
         if not current:
+            self._show_notice("warning", "请先从左侧选择一个图片或视频")
             self._log("warning", "Select an image or video before saving the manual ROI")
             return
         entries = self._merge_scene_regions_from_geometry(
@@ -812,8 +1100,10 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self._save_scene_regions(current, entries)
         if entries:
-            self._log("success", f"Saved {len(entries)} manual ROI region(s) for scene {Path(current).parent.name}")
+            self._show_notice("success", f"已保存 {len(entries)} 个区域及规则", duration_ms=2200)
+            self._log("success", f"Saved {len(entries)} manual ROI region(s) for file {Path(current).name}")
         else:
+            self._show_notice("success", "当前场景已移除保存的区域规则", duration_ms=2200)
             self._log("success", f"Removed saved manual ROI for scene {Path(current).parent.name}")
 
     def _region_rule_enabled(self, entry: dict, rule_type: str) -> bool:
@@ -866,7 +1156,8 @@ class MainWindow(QtWidgets.QMainWindow):
         entries[region_index] = self._create_region_entry(entry.get("points", []), index=region_index, existing=entry)
         self._set_cached_scene_regions(file_path, entries)
         self._save_scene_regions(file_path, entries)
-        self._apply_manual_roi_to_viewer(file_path)
+        self._apply_manual_roi_to_viewer(file_path, selected_index=region_index)
+        self._show_details_for_path(file_path)
         return entries[region_index]
 
     def _on_manual_roi_context_requested(self, region_index: int, global_pos, _scene_pos):
@@ -923,6 +1214,7 @@ class MainWindow(QtWidgets.QMainWindow):
             enabled = bool(act_no_parking.isChecked())
             self._set_region_rule_enabled(current, region_index, "no_parking", enabled)
             state_text = "enabled" if enabled else "disabled"
+            self._show_notice("success", f"区域 {region_index + 1}：禁止停车已{'启用' if enabled else '关闭'}", duration_ms=2200)
             self._log("success", f"Region {region_index + 1}: 禁止停车 {state_text}")
             return
 
@@ -930,6 +1222,7 @@ class MainWindow(QtWidgets.QMainWindow):
             enabled = bool(act_no_non_motor.isChecked())
             self._set_region_rule_enabled(current, region_index, "no_non_motor", enabled)
             state_text = "enabled" if enabled else "disabled"
+            self._show_notice("success", f"区域 {region_index + 1}：禁止非机动车已{'启用' if enabled else '关闭'}", duration_ms=2200)
             self._log("success", f"Region {region_index + 1}: 禁止非机动车 {state_text}")
             return
 
@@ -937,14 +1230,17 @@ class MainWindow(QtWidgets.QMainWindow):
             enabled = bool(act_no_wrong_way.isChecked())
             updated = self._set_region_rule_enabled(current, region_index, "no_wrong_way", enabled)
             state_text = "enabled" if enabled else "disabled"
+            self._show_notice("success", f"区域 {region_index + 1}：禁止逆行已{'启用' if enabled else '关闭'}", duration_ms=2200)
             self._log("success", f"Region {region_index + 1}: 禁止逆行 {state_text}")
             if enabled and updated is not None and len(updated.get("direction_line", [])) != 2:
                 self.viewer_panel.start_region_direction_drawing(int(region_index))
+                self._show_notice("info", "请在选中区域内点击两次设置允许方向", duration_ms=2600)
                 self._log("info", "Draw the allowed travel direction with two clicks inside the selected region")
             return
 
         if chosen == act_set_direction:
             self.viewer_panel.start_region_direction_drawing(int(region_index))
+            self._show_notice("info", "请在选中区域内点击两次设置允许方向", duration_ms=2600)
             self._log("info", "Draw the allowed travel direction with two clicks inside the selected region")
             return
 
@@ -954,7 +1250,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 entries[int(region_index)]["direction_line"] = []
                 self._set_cached_scene_regions(current, entries)
                 self._save_scene_regions(current, entries)
-                self._apply_manual_roi_to_viewer(current)
+                self._apply_manual_roi_to_viewer(current, selected_index=region_index)
+                self._show_details_for_path(current)
+                self._show_notice("success", f"区域 {region_index + 1}：已清除允许方向", duration_ms=2200)
                 self._log("info", f"Region {region_index + 1}: cleared wrong-way direction")
             return
 
@@ -969,6 +1267,8 @@ class MainWindow(QtWidgets.QMainWindow):
                         direction_lines=self.viewer_panel.region_direction_lines(),
                     ),
                 )
+                self._show_details_for_path(current)
+                self._show_notice("success", f"已删除区域 {region_index + 1}", duration_ms=2200)
                 self._log("info", f"Deleted region {region_index + 1}")
             return
 
@@ -982,8 +1282,10 @@ class MainWindow(QtWidgets.QMainWindow):
         entries[int(region_index)]["direction_line"] = self._normalize_direction_line(direction_line)
         self._set_cached_scene_regions(current, entries)
         self._save_scene_regions(current, entries)
-        self._apply_manual_roi_to_viewer(current)
+        self._apply_manual_roi_to_viewer(current, selected_index=region_index)
+        self._show_details_for_path(current)
         if len(entries[int(region_index)]["direction_line"]) == 2:
+            self._show_notice("success", f"区域 {region_index + 1}：已保存允许方向", duration_ms=2200)
             self._log("success", f"Region {region_index + 1}: saved allowed direction for no-wrong-way rule")
 
     def _scene_key_for_path(self, file_path: str) -> str:
@@ -991,6 +1293,21 @@ class MainWindow(QtWidgets.QMainWindow):
             return str(Path(file_path).resolve().parent)
         except Exception:
             return str(Path(file_path).parent)
+
+    def _region_key_for_path(self, file_path: str) -> str:
+        try:
+            return str(Path(file_path).resolve())
+        except Exception:
+            return str(Path(file_path))
+
+    def _region_profile_path_for_path(self, file_path: str) -> Path:
+        runtime = self._runtime_paths()
+        region_key = self._region_key_for_path(file_path)
+        digest = hashlib.sha1(region_key.encode("utf-8", errors="ignore")).hexdigest()[:10]
+        media_name = Path(region_key).stem or "media"
+        safe_name = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in media_name)
+        runtime["scene_profiles_dir"].mkdir(parents=True, exist_ok=True)
+        return runtime["scene_profiles_dir"] / f"{safe_name}_{digest}.json"
 
     def _scene_profile_path_for_path(self, file_path: str) -> Path:
         runtime = self._runtime_paths()
@@ -1008,7 +1325,7 @@ class MainWindow(QtWidgets.QMainWindow):
             polygons = [
                 [list(point) for point in entry.get("points", [])]
                 for entry in entries
-                if not self._region_has_bound_rules(entry)
+                if len(entry.get("points", [])) >= 3 and bool(entry.get("enabled", True))
             ]
             if polygons:
                 mapping[self._norm_path(path)] = polygons
@@ -1058,59 +1375,21 @@ class MainWindow(QtWidgets.QMainWindow):
     def _on_viewer_image_clicked(self, x: int, y: int):
         if self.viewer_panel.is_manual_roi_drawing():
             return
-
         current = self.workspace.selected_path()
-        if not current:
+        if not current or self._is_video_path(current):
+            if current:
+                self._show_details_for_path(current)
             return
-        if self._is_video_path(current):
-            self._log("info", "Video preview click inspection is not available yet. Use the summary panel on the right.")
-            return
-
-        key = self._norm_path(current)
-        result = self._results_by_path.get(key)
+        result = self._results_by_path.get(self._norm_path(current))
         if not result:
-            self._selected_detection_index = None
             self._show_details_for_path(current)
-            if self._is_video_path(current):
-                self._log("info", "Video preview is ready. Frame-by-frame detections will arrive in the next video stage.")
-            else:
-                self._log("warning", "Selected image has no processed result yet")
             return
-
-        point = (float(x), float(y))
-        hit = self._pick_detection_hit(result.get("detections", []), point)
+        hit = self._pick_detection_hit(result.get("detections", []), (float(x), float(y)))
         if hit is not None:
-            det = hit["detection"]
             self._selected_detection_index = int(hit["list_index"])
+            self._hover_detection_index = None
             self._set_preview(current)
-            self.violations.focus_detection(
-                image_path=current,
-                result=result,
-                detection=det,
-                candidate_count=hit["candidate_count"],
-                point=(int(x), int(y)),
-            )
-            self._log("info", f"Selected vehicle #{det.get('index', '?')} at ({x}, {y})")
-            return
-
-        lane_hit = self._pick_lane_hit(result.get("lane_polygons", []), point)
-        if lane_hit is not None:
-            self._selected_detection_index = None
-            self._set_preview(current)
-            self.violations.show_lane_details(
-                image_path=current,
-                result=result,
-                lane_index=lane_hit["index"],
-                lane_polygon=lane_hit["polygon"],
-                point=(int(x), int(y)),
-            )
-            self._log("info", f"Selected lane region #{lane_hit['index']} at ({x}, {y})")
-            return
-
-        self._selected_detection_index = None
-        self._set_preview(current)
         self._show_details_for_path(current)
-        self._log("info", f"No object hit at ({x}, {y})")
 
     def _on_viewer_image_hovered(self, x: int, y: int):
         if self.viewer_panel.is_manual_roi_drawing():
@@ -1140,6 +1419,18 @@ class MainWindow(QtWidgets.QMainWindow):
         current = self.workspace.selected_path()
         if current:
             self._set_preview(current)
+
+    def _summary_text_for_image_result(self, result: dict) -> str:
+        violations = int(result.get("violation_count", 0) or 0)
+        if violations > 0:
+            return f"{violations} 条疑似违规"
+        return "未发现违规"
+
+    def _summary_text_for_video_result(self, result: dict) -> str:
+        violations = int(result.get("total_violation_instances", 0) or 0)
+        if violations > 0:
+            return f"{violations} 条疑似违规"
+        return "未发现违规"
 
     def _render_preview(self):
         self.viewer_panel.refresh()
@@ -1177,6 +1468,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._log("warning", "Current run is already stopping; the latest run request is queued")
             return
         self._run_stop_requested = True
+        self._show_notice("warning", "正在停止当前分析", duration_ms=2200)
         try:
             request_stop = getattr(self._run_worker, "request_stop", None)
             if callable(request_stop):
@@ -1206,24 +1498,24 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _run_selected(self):
         if self.workspace.list.count() == 0:
+            self._show_notice("warning", "工作区为空，请先导入素材")
             self._log("warning", "Workspace is empty")
             return
-        targets = self.workspace.selected_paths()
+        targets = self.workspace.checked_paths()
         if not targets:
-            selected = self.workspace.selected_path()
-            if selected:
-                targets = [selected]
-        if not targets:
-            self._log("warning", "Select at least one image to run")
+            self._show_notice("warning", "请先勾选要分析的视频或图片")
+            self._log("warning", "Check at least one image or video to run")
             return
-        self._queue_or_start_run(targets, label="Run selected")
+        self._queue_or_start_run(targets, label="开始分析")
 
     def _run_all(self):
         if self.workspace.list.count() == 0:
+            self._show_notice("warning", "工作区为空，请先导入素材")
             self._log("warning", "Workspace is empty")
             return
         targets = self.workspace.all_paths()
         if not targets:
+            self._show_notice("warning", "工作区为空，请先导入素材")
             self._log("warning", "Workspace is empty")
             return
         self._queue_or_start_run(targets, label="Run all")
@@ -1256,11 +1548,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self._run_started_at = time.monotonic()
         self._run_stop_requested = False
         self._active_run_paths = list(paths)
-        self.violations.clear_results()
         self.workspace.set_status_for_paths(paths, self.workspace.STATUS_RUNNING)
         for path in paths:
             self.workspace.set_failure_reason_for_path(path, "")
         manual_mapping = self._manual_lane_mapping_for_paths(paths)
+        self._refresh_primary_actions()
+        self._set_run_feedback(
+            visible=True,
+            text=f"正在分析 0/{len(paths)}",
+            value=0,
+            maximum=max(1, len(paths) * 100),
+            progress_text="0%",
+        )
         self._log("info", f"{label}: {len(paths)} image(s), manual ROI applied to {len(manual_mapping)} image(s)")
 
         self._run_thread = QtCore.QThread(self)
@@ -1272,7 +1571,7 @@ class MainWindow(QtWidgets.QMainWindow):
             db_path=runtime["db_path"],
             threshold=0.3,
             location="GUI-Camera-01",
-            layers=self.viewer_panel.layers_state(),
+            layers=self._processing_layers_state(),
             manual_lane_polygons_by_path=manual_mapping,
         )
         self._run_worker.moveToThread(self._run_thread)
@@ -1301,7 +1600,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self._run_started_at = time.monotonic()
         self._run_stop_requested = False
         self._active_run_paths = list(paths)
-        self.violations.clear_results()
         self.workspace.set_status_for_paths(paths, self.workspace.STATUS_RUNNING)
         for path in paths:
             self.workspace.set_failure_reason_for_path(path, "")
@@ -1317,6 +1615,14 @@ class MainWindow(QtWidgets.QMainWindow):
                 approx_processed_fps = max(fps_samples) / max(1, int(frame_stride))
         except Exception:
             approx_processed_fps = 0.0
+        self._refresh_primary_actions()
+        self._set_run_feedback(
+            visible=True,
+            text=f"正在分析 0/{len(paths)}",
+            value=0,
+            maximum=max(1, len(paths) * 100),
+            progress_text="0%",
+        )
         self._log(
             "info",
             f"{label}: {len(paths)} video(s), scene regions on {len(scene_region_mapping)} scene(s), legacy lane override on {len(manual_mapping)} scene(s), saved count lines on {len(count_line_mapping)} scene(s), frame_stride={frame_stride}" + (f", target processed FPS~{approx_processed_fps:.1f}" if approx_processed_fps > 0 else ""),
@@ -1330,7 +1636,7 @@ class MainWindow(QtWidgets.QMainWindow):
             output_dir=runtime["video_output_dir"],
             preview_dir=runtime["video_preview_dir"],
             threshold=0.3,
-            layers=self.viewer_panel.layers_state(),
+            layers=self._processing_layers_state(),
             manual_lane_polygons_by_path=manual_mapping,
             scene_regions_by_path=scene_region_mapping,
             count_lines_by_path=count_line_mapping,
@@ -1360,6 +1666,15 @@ class MainWindow(QtWidgets.QMainWindow):
         current = self.workspace.selected_path()
         if current and self._norm_path(current) == key:
             self._show_details_for_path(image_path)
+            self._set_preview(image_path)
+        progress_value = max(0, min(int(index - 1), max(1, int(total)))) * 100
+        self._set_run_feedback(
+            visible=True,
+            text=f"正在分析 {index}/{total} · {Path(image_path).name}",
+            value=progress_value,
+            maximum=max(1, int(total) * 100),
+            progress_text=f"{int(round((progress_value / max(1, int(total) * 100)) * 100.0))}%",
+        )
         self._log("info", f"Running {index}/{total}: {Path(image_path).name}")
 
     def _recommended_video_frame_stride(self, paths: list) -> int:
@@ -1403,9 +1718,23 @@ class MainWindow(QtWidgets.QMainWindow):
         current = self.workspace.selected_path()
         if current and self._norm_path(current) == key:
             self._show_details_for_path(video_path)
+            self._set_preview(video_path)
 
         processed_frames = int(payload.get("processed_frame_count", 0) or 0)
         expected_frames = int(payload.get("expected_processed_frame_count", 0) or 0)
+        if expected_frames > 0:
+            total_units = max(1, int(total) * 100)
+            per_item = total_units // max(1, int(total))
+            current_value = (int(index) - 1) * per_item + int(min(processed_frames / expected_frames, 1.0) * per_item)
+            percent = min(100.0, (float(processed_frames) / float(expected_frames)) * 100.0)
+            remaining_frames = max(0, expected_frames - processed_frames)
+            self._set_run_feedback(
+                visible=True,
+                text=f"正在分析 {index}/{total} · {Path(video_path).name}",
+                value=current_value,
+                maximum=total_units,
+                progress_text=f"{percent:.1f}% · 剩余 {remaining_frames} 帧",
+            )
         now = time.monotonic()
         state = self._video_progress_log_state.get(key, {})
         last_count = int(state.get("processed_frames", 0) or 0)
@@ -1449,6 +1778,7 @@ class MainWindow(QtWidgets.QMainWindow):
         key = self._norm_path(image_path)
         self._video_progress_log_state.pop(key, None)
         self._results_by_path[key] = result
+        self._sync_auto_lane_regions_from_result(image_path, result)
         self.workspace.set_status_for_path(image_path, self.workspace.STATUS_DONE)
         self.workspace.set_failure_reason_for_path(image_path, "")
 
@@ -1456,6 +1786,20 @@ class MainWindow(QtWidgets.QMainWindow):
         if current and self._norm_path(current) == key:
             self._show_details_for_path(image_path)
             self._set_preview(image_path)
+
+        if result.get("media_type") == "video":
+            summary = self._summary_text_for_video_result(result)
+        else:
+            summary = self._summary_text_for_image_result(result)
+        self.workspace.set_result_summary_for_path(image_path, summary)
+        progress_value = max(1, int(index)) * 100
+        self._set_run_feedback(
+            visible=True,
+            text=f"已完成 {index}/{total} · {Path(image_path).name}",
+            value=progress_value,
+            maximum=max(1, int(total) * 100),
+            progress_text="100%",
+        )
 
         elapsed = time.monotonic() - self._run_started_at
         if result.get("media_type") == "video":
@@ -1499,9 +1843,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self._video_progress_log_state.pop(self._norm_path(image_path), None)
         self.workspace.set_status_for_path(image_path, self.workspace.STATUS_FAILED)
         self.workspace.set_failure_reason_for_path(image_path, error)
+        self.workspace.set_result_summary_for_path(image_path, "分析失败")
         current = self.workspace.selected_path()
         if current and self._norm_path(current) == self._norm_path(image_path):
             self._show_details_for_path(image_path)
+            self._set_preview(image_path)
+        progress_value = max(1, int(index)) * 100
+        self._set_run_feedback(
+            visible=True,
+            text=f"分析失败 {index}/{total} · {Path(image_path).name}",
+            value=progress_value,
+            maximum=max(1, int(total) * 100),
+            progress_text=f"{int(round((progress_value / max(1, int(total) * 100)) * 100.0))}%",
+        )
         elapsed = time.monotonic() - self._run_started_at
         self._log("error", f"Failed {index}/{total}: {Path(image_path).name}, error={error}, elapsed={elapsed:.1f}s")
 
@@ -1514,11 +1868,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self._is_running = False
         if self._run_stop_requested:
             self._log("warning", f"{self._run_label} interrupted after {elapsed:.1f}s")
+            self._show_notice("warning", "分析已停止", duration_ms=2600)
+            self._set_run_feedback(visible=True, text="分析已停止", value=0, maximum=100, progress_text="0%")
         else:
             self._log("info", f"{self._run_label} finished in {elapsed:.1f}s")
+            self._show_notice("success", "分析完成", duration_ms=2600)
+            self._set_run_feedback(visible=True, text="分析完成", value=100, maximum=100, progress_text="100%")
         self._run_worker = None
         self._run_stop_requested = False
         self._active_run_paths = []
+        self._refresh_primary_actions()
 
     def _on_run_thread_finished(self):
         self._run_thread = None
@@ -1530,6 +1889,7 @@ class MainWindow(QtWidgets.QMainWindow):
             0,
             lambda request=pending: self._start_run(list(request.get("paths", [])), label=str(request.get("label", "Run"))),
         )
+        self._refresh_primary_actions()
 
     def _pick_detection_hit(self, detections, point):
         px, py = point
@@ -1624,31 +1984,40 @@ class MainWindow(QtWidgets.QMainWindow):
             return self._hover_detection_index
         return self._selected_detection_index
 
+    def _sync_auto_lane_regions_from_result(self, file_path: str, result: dict) -> bool:
+        if str(result.get("lane_source", "") or "").strip().lower() != "auto":
+            return False
+        lane_polygons = list(result.get("lane_polygons", []) or [])
+        if not lane_polygons:
+            return False
+        existing_entries = self._load_scene_regions(file_path)
+        if existing_entries:
+            return False
+
+        auto_entries = self._build_auto_lane_region_entries(lane_polygons)
+        if not auto_entries:
+            return False
+
+        self._set_cached_scene_regions(file_path, auto_entries)
+        self._save_scene_regions(file_path, auto_entries)
+        self._log("info", f"Synced {len(auto_entries)} auto-segmented emergency lane region(s) for {Path(file_path).name}")
+        return True
+
     def _show_details_for_path(self, file_path: str):
-        key = self._norm_path(file_path)
-        result = self._results_by_path.get(key)
-        status = self.workspace.status_of_path(file_path) or ""
-        failure_reason = self.workspace.failure_reason_of_path(file_path)
-        if self._is_video_path(file_path):
-            video_info = None
-            try:
-                video_info = self._load_video_info(file_path)
-            except Exception:
-                video_info = None
-            self.violations.show_video_details(
-                video_path=file_path,
-                status=status,
-                failure_reason=failure_reason,
-                video_info=video_info,
-                result=result,
-            )
+        result = self._results_by_path.get(self._norm_path(file_path))
+        self.region_rules.show_media_overview(file_path, result)
+        entries = self._load_scene_regions(file_path)
+        selected_index = self.viewer_panel.selected_manual_roi_index()
+        if entries and selected_index is None:
+            self.region_rules.show_region_selection_hint(len(entries))
             return
-        self.violations.show_file_details(
-            image_path=file_path,
-            status=status,
-            failure_reason=failure_reason,
-            result=result,
-        )
+        if selected_index is not None and entries and 0 <= int(selected_index) < len(entries):
+            self.region_rules.show_region_rules(entries[int(selected_index)], int(selected_index))
+            return
+        if not entries:
+            self.region_rules.show_no_regions()
+        else:
+            self.region_rules.show_region_selection_hint(len(entries))
 
     def _norm_path(self, path: str) -> str:
         return str(Path(path).resolve(strict=False))

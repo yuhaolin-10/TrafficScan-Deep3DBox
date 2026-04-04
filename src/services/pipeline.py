@@ -44,6 +44,42 @@ def _build_lane_mask(image_shape, lane_polygons):
     return lane_mask
 
 
+def _mask_to_lane_polygons(mask):
+    lane_mask = np.asarray(mask, dtype=np.uint8)
+    if lane_mask.ndim != 2:
+        return []
+    contours, _ = cv2.findContours(lane_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    polygons = []
+    for contour in contours or []:
+        pts = np.asarray(contour, dtype=np.int32).reshape(-1, 2)
+        if pts.shape[0] < 3:
+            continue
+        polygons.append(pts)
+    return _normalize_lane_polygons(polygons)
+
+
+def _detect_lane_region(frame, lane_detector):
+    if lane_detector is None:
+        return None, []
+    try:
+        lane_mask, lane_polygons = lane_detector.detect(frame)
+    except Exception:
+        return None, []
+
+    normalized_polygons = _normalize_lane_polygons(lane_polygons)
+    if normalized_polygons:
+        normalized_mask = _build_lane_mask(frame.shape, normalized_polygons)
+        return normalized_mask, normalized_polygons
+
+    if lane_mask is None:
+        return None, []
+    mask = np.asarray(lane_mask, dtype=np.uint8)
+    if mask.ndim != 2 or mask.shape[:2] != frame.shape[:2]:
+        return None, []
+    normalized_mask = np.where(mask > 0, 255, 0).astype(np.uint8)
+    return normalized_mask, _mask_to_lane_polygons(normalized_mask)
+
+
 def _normalize_plate_mode(plate_mode):
     mode = str(plate_mode or "violating_only").strip().lower()
     if mode not in {"violating_only", "eligible_vehicle", "disabled"}:
@@ -115,9 +151,8 @@ def process_frame(
         lane_mask = _build_lane_mask(frame.shape, lane_polygons)
         lane_source = "manual"
     else:
-        lane_mask = None
-        lane_polygons = []
-        lane_source = "none"
+        lane_mask, lane_polygons = _detect_lane_region(frame, lane_detector)
+        lane_source = "auto" if (lane_mask is not None or lane_polygons) else "none"
 
     vehicles = vehicle_detector.detect(frame, lane_polygons=lane_polygons)
     lane_area_px = int(np.count_nonzero(lane_mask)) if lane_mask is not None else 0
