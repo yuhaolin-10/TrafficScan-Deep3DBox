@@ -56,6 +56,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._run_stop_requested = False
         self._pending_run_request = None
         self._active_run_paths = []
+        self._run_plan = []
+        self._run_plan_index = -1
+        self._run_total_task_count = 0
         self._results_by_path = {}
         self._hover_detection_index = None
         self._selected_detection_index = None
@@ -1461,20 +1464,64 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self._start_run(request["paths"], label=request["label"])
 
+    def _build_run_plan(self, paths: list) -> list:
+        grouped = {}
+        order = []
+        for path in list(paths or []):
+            media_type = "video" if self._is_video_path(path) else "image"
+            if media_type not in grouped:
+                grouped[media_type] = []
+                order.append(media_type)
+            grouped[media_type].append(path)
+        return [
+            {
+                "media_type": media_type,
+                "paths": list(grouped.get(media_type, [])),
+            }
+            for media_type in order
+            if grouped.get(media_type)
+        ]
+
+    def _current_run_stage(self):
+        if 0 <= int(self._run_plan_index) < len(self._run_plan):
+            return self._run_plan[self._run_plan_index]
+        return None
+
+    def _current_run_stage_offset(self) -> int:
+        if self._run_plan_index <= 0:
+            return 0
+        return int(
+            sum(len(stage.get("paths", [])) for stage in self._run_plan[: int(self._run_plan_index)])
+        )
+
+    def _run_progress_meta(self, local_index: int):
+        total_items = max(1, int(self._run_total_task_count or len(self._active_run_paths)))
+        stage_offset = self._current_run_stage_offset()
+        global_index = max(1, min(total_items, stage_offset + int(local_index)))
+        maximum = max(1, total_items * 100)
+        return stage_offset, global_index, total_items, maximum
+
+    def _progress_percent_text(self, value: int, maximum: int) -> str:
+        if int(maximum) <= 0:
+            return "0%"
+        percent = int(round((float(value) / float(maximum)) * 100.0))
+        return f"{percent}%"
+
     def _request_stop_current_run(self):
-        if not self._is_running or self._run_worker is None:
+        if not self._is_running:
             return
         if self._run_stop_requested:
             self._log("warning", "Current run is already stopping; the latest run request is queued")
             return
         self._run_stop_requested = True
         self._show_notice("warning", "正在停止当前分析", duration_ms=2200)
-        try:
-            request_stop = getattr(self._run_worker, "request_stop", None)
-            if callable(request_stop):
-                request_stop()
-        except Exception:
-            pass
+        if self._run_worker is not None:
+            try:
+                request_stop = getattr(self._run_worker, "request_stop", None)
+                if callable(request_stop):
+                    request_stop()
+            except Exception:
+                pass
         self._log("warning", "Another run was requested, stopping the current run and switching when it exits")
 
     def _mark_interrupted_run_paths(self):
@@ -1529,13 +1576,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self._request_stop_current_run()
             return
 
-        media_types = {"video" if self._is_video_path(path) else "image" for path in paths}
-        if len(media_types) > 1:
-            self._log("warning", "Please run image files and video files separately")
-            return
-
-        if media_types == {"video"}:
-            self._start_video_run(paths, label=label)
+        run_plan = self._build_run_plan(paths)
+        if not run_plan:
+            self._show_notice("warning", "没有可执行的图片或视频任务")
+            self._log("warning", "No runnable image or video tasks were found")
             return
 
         runtime = self._runtime_paths()
@@ -1548,10 +1592,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self._run_started_at = time.monotonic()
         self._run_stop_requested = False
         self._active_run_paths = list(paths)
+        self._run_plan = list(run_plan)
+        self._run_plan_index = 0
+        self._run_total_task_count = len(paths)
         self.workspace.set_status_for_paths(paths, self.workspace.STATUS_RUNNING)
         for path in paths:
             self.workspace.set_failure_reason_for_path(path, "")
-        manual_mapping = self._manual_lane_mapping_for_paths(paths)
         self._refresh_primary_actions()
         self._set_run_feedback(
             visible=True,
@@ -1560,7 +1606,36 @@ class MainWindow(QtWidgets.QMainWindow):
             maximum=max(1, len(paths) * 100),
             progress_text="0%",
         )
-        self._log("info", f"{label}: {len(paths)} image(s), manual ROI applied to {len(manual_mapping)} image(s)")
+        media_summary = ", ".join(
+            f"{len(stage.get('paths', []))} {stage.get('media_type', 'unknown')}(s)"
+            for stage in self._run_plan
+        )
+        self._log("info", f"{label}: queued mixed run with {media_summary}")
+        self._start_current_run_stage()
+
+    def _start_current_run_stage(self):
+        if not self._is_running:
+            return
+        stage = self._current_run_stage()
+        if stage is None:
+            self._finalize_run()
+            return
+        paths = list(stage.get("paths", []))
+        media_type = str(stage.get("media_type", "image") or "image").strip().lower()
+        if media_type == "video":
+            self._start_video_stage(paths)
+            return
+        self._start_image_stage(paths)
+
+    def _start_image_stage(self, paths: list):
+        runtime = self._runtime_paths()
+        manual_mapping = self._manual_lane_mapping_for_paths(paths)
+        stage_number = int(self._run_plan_index) + 1
+        stage_total = max(1, len(self._run_plan))
+        self._log(
+            "info",
+            f"{self._run_label}: stage {stage_number}/{stage_total}, {len(paths)} image(s), manual ROI applied to {len(manual_mapping)} image(s)",
+        )
 
         self._run_thread = QtCore.QThread(self)
         self._run_worker = ProcessingWorker(
@@ -1589,20 +1664,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self._run_thread.start()
 
-    def _start_video_run(self, paths: list, *, label: str):
+    def _start_video_stage(self, paths: list):
         runtime = self._runtime_paths()
-        if not runtime["vehicle_model_path"].exists():
-            self._log("error", f"Vehicle model not found: {runtime['vehicle_model_path']}")
-            return
-
-        self._is_running = True
-        self._run_label = label
-        self._run_started_at = time.monotonic()
-        self._run_stop_requested = False
-        self._active_run_paths = list(paths)
-        self.workspace.set_status_for_paths(paths, self.workspace.STATUS_RUNNING)
-        for path in paths:
-            self.workspace.set_failure_reason_for_path(path, "")
         manual_mapping = self._manual_lane_mapping_for_paths(paths)
         scene_region_mapping = self._scene_region_mapping_for_paths(paths)
         count_line_mapping = self._count_line_mapping_for_paths(paths)
@@ -1615,17 +1678,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 approx_processed_fps = max(fps_samples) / max(1, int(frame_stride))
         except Exception:
             approx_processed_fps = 0.0
-        self._refresh_primary_actions()
-        self._set_run_feedback(
-            visible=True,
-            text=f"正在分析 0/{len(paths)}",
-            value=0,
-            maximum=max(1, len(paths) * 100),
-            progress_text="0%",
-        )
+        stage_number = int(self._run_plan_index) + 1
+        stage_total = max(1, len(self._run_plan))
         self._log(
             "info",
-            f"{label}: {len(paths)} video(s), scene regions on {len(scene_region_mapping)} scene(s), legacy lane override on {len(manual_mapping)} scene(s), saved count lines on {len(count_line_mapping)} scene(s), frame_stride={frame_stride}" + (f", target processed FPS~{approx_processed_fps:.1f}" if approx_processed_fps > 0 else ""),
+            f"{self._run_label}: stage {stage_number}/{stage_total}, {len(paths)} video(s), scene regions on {len(scene_region_mapping)} scene(s), legacy lane override on {len(manual_mapping)} scene(s), saved count lines on {len(count_line_mapping)} scene(s), frame_stride={frame_stride}" + (f", target processed FPS~{approx_processed_fps:.1f}" if approx_processed_fps > 0 else ""),
         )
 
         self._run_thread = QtCore.QThread(self)
@@ -1667,15 +1724,16 @@ class MainWindow(QtWidgets.QMainWindow):
         if current and self._norm_path(current) == key:
             self._show_details_for_path(image_path)
             self._set_preview(image_path)
-        progress_value = max(0, min(int(index - 1), max(1, int(total)))) * 100
+        stage_offset, global_index, global_total, maximum = self._run_progress_meta(index)
+        progress_value = max(0, min(stage_offset + int(index) - 1, global_total)) * 100
         self._set_run_feedback(
             visible=True,
-            text=f"正在分析 {index}/{total} · {Path(image_path).name}",
+            text=f"正在分析 {global_index}/{global_total} · {Path(image_path).name}",
             value=progress_value,
-            maximum=max(1, int(total) * 100),
-            progress_text=f"{int(round((progress_value / max(1, int(total) * 100)) * 100.0))}%",
+            maximum=maximum,
+            progress_text=self._progress_percent_text(progress_value, maximum),
         )
-        self._log("info", f"Running {index}/{total}: {Path(image_path).name}")
+        self._log("info", f"Running {global_index}/{global_total}: {Path(image_path).name}")
 
     def _recommended_video_frame_stride(self, paths: list) -> int:
         target_processed_fps = 6.0
@@ -1723,17 +1781,18 @@ class MainWindow(QtWidgets.QMainWindow):
         processed_frames = int(payload.get("processed_frame_count", 0) or 0)
         expected_frames = int(payload.get("expected_processed_frame_count", 0) or 0)
         if expected_frames > 0:
-            total_units = max(1, int(total) * 100)
-            per_item = total_units // max(1, int(total))
-            current_value = (int(index) - 1) * per_item + int(min(processed_frames / expected_frames, 1.0) * per_item)
+            stage_offset, global_index, global_total, total_units = self._run_progress_meta(index)
+            local_fraction = min(processed_frames / expected_frames, 1.0)
+            current_value = max(0, min(stage_offset + int(index) - 1, global_total)) * 100 + int(local_fraction * 100)
+            current_value = max(0, min(current_value, total_units))
             percent = min(100.0, (float(processed_frames) / float(expected_frames)) * 100.0)
             remaining_frames = max(0, expected_frames - processed_frames)
             self._set_run_feedback(
                 visible=True,
-                text=f"正在分析 {index}/{total} · {Path(video_path).name}",
+                text=f"正在分析 {global_index}/{global_total} · {Path(video_path).name}",
                 value=current_value,
                 maximum=total_units,
-                progress_text=f"{percent:.1f}% · 剩余 {remaining_frames} 帧",
+                progress_text=f"{self._progress_percent_text(current_value, total_units)} · 当前视频 {percent:.1f}% · 剩余 {remaining_frames} 帧",
             )
         now = time.monotonic()
         state = self._video_progress_log_state.get(key, {})
@@ -1765,9 +1824,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 f"current_region_rule_hits={current_region_rule_count}"
             )
         frame_text = f"{processed_frames}/{expected_frames}" if expected_frames > 0 else f"{processed_frames}/?"
+        _, global_index, global_total, _ = self._run_progress_meta(index)
         self._log(
             "info",
-            f"Progress {index}/{total}: {Path(video_path).name}, processed={frame_text} ({percent:.1f}%), source_frame={current_frame_index}, current_vehicles={current_vehicles}, traffic_count={traffic_count}{region_rule_suffix}, throughput={throughput:.2f} fps, eta={eta_text}",
+            f"Progress {global_index}/{global_total}: {Path(video_path).name}, processed={frame_text} ({percent:.1f}%), source_frame={current_frame_index}, current_vehicles={current_vehicles}, traffic_count={traffic_count}{region_rule_suffix}, throughput={throughput:.2f} fps, eta={eta_text}",
         )
         self._video_progress_log_state[key] = {
             "processed_frames": int(processed_frames),
@@ -1792,13 +1852,14 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             summary = self._summary_text_for_image_result(result)
         self.workspace.set_result_summary_for_path(image_path, summary)
-        progress_value = max(1, int(index)) * 100
+        stage_offset, global_index, global_total, maximum = self._run_progress_meta(index)
+        progress_value = max(1, min(stage_offset + int(index), global_total)) * 100
         self._set_run_feedback(
             visible=True,
-            text=f"已完成 {index}/{total} · {Path(image_path).name}",
+            text=f"已完成 {global_index}/{global_total} · {Path(image_path).name}",
             value=progress_value,
-            maximum=max(1, int(total) * 100),
-            progress_text="100%",
+            maximum=maximum,
+            progress_text=self._progress_percent_text(progress_value, maximum),
         )
 
         elapsed = time.monotonic() - self._run_started_at
@@ -1827,7 +1888,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
             self._log(
                 "success",
-                f"Done {index}/{total}: {Path(image_path).name}, processed_frames={processed_frames}/{frames}, vehicle_instances={vehicles}, tracks={tracks}, traffic_count={traffic_count}, plate_ocr={plate_ocr_attempts}/{plate_ocr_successes}, counter={count_source}, violations={violations}{region_rule_suffix}, elapsed={elapsed:.1f}s",
+                f"Done {global_index}/{global_total}: {Path(image_path).name}, processed_frames={processed_frames}/{frames}, vehicle_instances={vehicles}, tracks={tracks}, traffic_count={traffic_count}, plate_ocr={plate_ocr_attempts}/{plate_ocr_successes}, counter={count_source}, violations={violations}{region_rule_suffix}, elapsed={elapsed:.1f}s",
             )
             return
 
@@ -1836,7 +1897,7 @@ class MainWindow(QtWidgets.QMainWindow):
         lane_source = str(result.get("lane_source", "auto"))
         self._log(
             "success",
-            f"Done {index}/{total}: {Path(image_path).name}, vehicles={vehicles}, violations={violations}, lane={lane_source}, elapsed={elapsed:.1f}s",
+            f"Done {global_index}/{global_total}: {Path(image_path).name}, vehicles={vehicles}, violations={violations}, lane={lane_source}, elapsed={elapsed:.1f}s",
         )
 
     def _on_task_failed(self, image_path: str, error: str, index: int, total: int):
@@ -1848,18 +1909,19 @@ class MainWindow(QtWidgets.QMainWindow):
         if current and self._norm_path(current) == self._norm_path(image_path):
             self._show_details_for_path(image_path)
             self._set_preview(image_path)
-        progress_value = max(1, int(index)) * 100
+        stage_offset, global_index, global_total, maximum = self._run_progress_meta(index)
+        progress_value = max(1, min(stage_offset + int(index), global_total)) * 100
         self._set_run_feedback(
             visible=True,
-            text=f"分析失败 {index}/{total} · {Path(image_path).name}",
+            text=f"分析失败 {global_index}/{global_total} · {Path(image_path).name}",
             value=progress_value,
-            maximum=max(1, int(total) * 100),
-            progress_text=f"{int(round((progress_value / max(1, int(total) * 100)) * 100.0))}%",
+            maximum=maximum,
+            progress_text=self._progress_percent_text(progress_value, maximum),
         )
         elapsed = time.monotonic() - self._run_started_at
-        self._log("error", f"Failed {index}/{total}: {Path(image_path).name}, error={error}, elapsed={elapsed:.1f}s")
+        self._log("error", f"Failed {global_index}/{global_total}: {Path(image_path).name}, error={error}, elapsed={elapsed:.1f}s")
 
-    def _on_run_finished(self):
+    def _finalize_run(self):
         if not self._is_running:
             return
         elapsed = time.monotonic() - self._run_started_at
@@ -1875,12 +1937,32 @@ class MainWindow(QtWidgets.QMainWindow):
             self._show_notice("success", "分析完成", duration_ms=2600)
             self._set_run_feedback(visible=True, text="分析完成", value=100, maximum=100, progress_text="100%")
         self._run_worker = None
+        self._run_thread = None
         self._run_stop_requested = False
         self._active_run_paths = []
+        self._run_plan = []
+        self._run_plan_index = -1
+        self._run_total_task_count = 0
         self._refresh_primary_actions()
+
+    def _on_run_finished(self):
+        if not self._is_running:
+            return
+        self._run_worker = None
 
     def _on_run_thread_finished(self):
         self._run_thread = None
+        if self._is_running:
+            has_next_stage = (
+                not self._run_stop_requested
+                and (int(self._run_plan_index) + 1) < len(self._run_plan)
+            )
+            if has_next_stage:
+                self._run_plan_index += 1
+                QtCore.QTimer.singleShot(0, self._start_current_run_stage)
+                self._refresh_primary_actions()
+                return
+            self._finalize_run()
         pending = self._pending_run_request
         if pending is None or self._is_running:
             return

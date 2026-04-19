@@ -1,0 +1,13 @@
+flowchart TB
+    GUI[图形界面] --> CFG[场景配置管理]
+    CFG --> JSON[data/scene_profiles/*.json]
+
+    IMGPIPE[图像分析管线] --> IMG[data/images]
+    IMGPIPE --> DB[(SQLite数据库)]
+
+    VIDPIPE[视频分析管线] --> MP4[data/videos]
+    VIDPIPE --> PREJPG[data/video_previews/*.jpg]
+    VIDPIPE --> META[data/video_previews/*.jsonl]
+
+    DB --> T1[图片记录/检测结果/车道信息]
+    DB --> T2[审核与扩展表结构]
