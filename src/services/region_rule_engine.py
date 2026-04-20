@@ -10,11 +10,13 @@ import numpy as np
 
 Point = Tuple[float, float]
 
+RULE_EMERGENCY_LANE_OCCUPATION = "emergency_lane_occupation"
 RULE_NO_PARKING = "no_parking"
 RULE_NO_NON_MOTOR = "no_non_motor"
 RULE_NO_WRONG_WAY = "no_wrong_way"
 
 RULE_DISPLAY_NAMES = {
+    RULE_EMERGENCY_LANE_OCCUPATION: "占用应急车道",
     RULE_NO_PARKING: "禁止停车",
     RULE_NO_NON_MOTOR: "禁止非机动车",
     RULE_NO_WRONG_WAY: "禁止逆行",
@@ -90,6 +92,54 @@ def _polygon_overlap_ratio(subject_points, region_points) -> float:
         return 0.0
     overlap_area = int(np.count_nonzero(cv2.bitwise_and(subject_mask, region_mask)))
     return float(overlap_area) / float(subject_area)
+
+
+def _polygon_centroid(points) -> Optional[Point]:
+    polygon = np.asarray(points or [], dtype=np.float32)
+    if polygon.ndim != 2 or polygon.shape[0] <= 0 or polygon.shape[1] != 2:
+        return None
+    return float(np.mean(polygon[:, 0])), float(np.mean(polygon[:, 1]))
+
+
+def _bbox_center(bbox) -> Optional[Point]:
+    try:
+        if len(bbox) != 4:
+            return None
+        x1, y1, x2, y2 = [float(value) for value in bbox]
+        return (x1 + x2) * 0.5, (y1 + y2) * 0.5
+    except Exception:
+        return None
+
+
+def _detection_anchor_point(detection: dict) -> Optional[Point]:
+    for candidate in (
+        detection.get("track_anchor", []),
+        detection.get("label_anchor", []),
+        dict(detection.get("yaw_debug_vectors", {}) or {}).get("center", []),
+    ):
+        point = _as_point(candidate)
+        if point is not None:
+            return point
+    centroid = _polygon_centroid(detection.get("footprint", []))
+    if centroid is not None:
+        return centroid
+    return _bbox_center(detection.get("bbox", []))
+
+
+def _detection_direction_unit(detection: dict) -> Optional[Tuple[float, float]]:
+    vectors = dict(detection.get("yaw_debug_vectors", {}) or {})
+    for candidate in (
+        vectors.get("final_direction", []),
+        vectors.get("perspective_direction", []),
+        dict(vectors.get("lane_prior", {}) or {}).get("direction", []),
+    ):
+        point = _as_point(candidate)
+        if point is None:
+            continue
+        direction = _normalize_vec((0.0, 0.0), point)
+        if direction is not None:
+            return direction
+    return None
 
 
 @dataclass
@@ -355,6 +405,75 @@ class RegionRuleEngine:
             return None
         state["triggered"] = True
         return self._new_event(detection, region, RULE_NO_WRONG_WAY, frame_index=frame_index, timestamp_s=timestamp_s)
+
+    def apply_image(self, detections, *, frame_index=None, timestamp_s=None):
+        if not self.regions:
+            return list(detections or []), [], {"no_parking": 0, "no_non_motor": 0, "no_wrong_way": 0}
+
+        enriched = [dict(detection or {}) for detection in list(detections or [])]
+        new_events = []
+        summary_counts = {
+            RULE_NO_PARKING: 0,
+            RULE_NO_NON_MOTOR: 0,
+            RULE_NO_WRONG_WAY: 0,
+        }
+
+        for detection in enriched:
+            anchor = _detection_anchor_point(detection)
+            if anchor is None:
+                continue
+            detection["track_anchor"] = [float(anchor[0]), float(anchor[1])]
+            overlap_cache = {}
+            direction_unit = _detection_direction_unit(detection)
+            vehicle_type = str(detection.get("vehicle_type", "") or "").strip().lower()
+
+            for region in self.regions:
+                inside = _point_in_polygon(anchor, region.polygon)
+                for binding in region.rule_bindings:
+                    rule_type = str(binding.get("rule_type", "") or "").strip().lower()
+                    if rule_type not in {RULE_NO_NON_MOTOR, RULE_NO_WRONG_WAY}:
+                        continue
+
+                    overlap_ratio = overlap_cache.get(region.region_id)
+                    if overlap_ratio is None:
+                        overlap_ratio = _polygon_overlap_ratio(detection.get("footprint", []), region.points)
+                        overlap_cache[region.region_id] = float(overlap_ratio)
+
+                    params = dict(binding.get("params", {}) or {})
+                    if rule_type == RULE_NO_NON_MOTOR:
+                        target_classes = {
+                            str(item).strip().lower()
+                            for item in params.get("target_classes", ["bicycle", "motorcycle", "person"])
+                            if str(item).strip()
+                        }
+                        min_overlap_ratio = min(1.0, max(0.0, float(params.get("min_roi_overlap_ratio", 0.20) or 0.20)))
+                        if vehicle_type not in target_classes:
+                            continue
+                        if not inside and float(overlap_ratio) < min_overlap_ratio:
+                            continue
+                        self._append_violation(detection, region, RULE_NO_NON_MOTOR)
+                        new_events.append(self._new_event(detection, region, RULE_NO_NON_MOTOR, frame_index=frame_index, timestamp_s=timestamp_s))
+                        summary_counts[RULE_NO_NON_MOTOR] += 1
+                        continue
+
+                    if region.direction_unit is None or direction_unit is None:
+                        continue
+                    target_classes = {
+                        str(item).strip().lower()
+                        for item in params.get("target_classes", ["car", "truck", "bus", "motorcycle", "bicycle"])
+                        if str(item).strip()
+                    }
+                    min_overlap_ratio = min(1.0, max(0.0, float(params.get("min_roi_overlap_ratio", 0.20) or 0.20)))
+                    dot_threshold = float(params.get("wrong_way_dot_threshold", -0.10) or -0.10)
+                    if vehicle_type not in target_classes or float(overlap_ratio) < min_overlap_ratio:
+                        continue
+                    if _dot(direction_unit, region.direction_unit) > dot_threshold:
+                        continue
+                    self._append_violation(detection, region, RULE_NO_WRONG_WAY)
+                    new_events.append(self._new_event(detection, region, RULE_NO_WRONG_WAY, frame_index=frame_index, timestamp_s=timestamp_s))
+                    summary_counts[RULE_NO_WRONG_WAY] += 1
+
+        return enriched, new_events, summary_counts
 
     def apply(self, detections, *, frame_index=None, timestamp_s=None):
         if not self.regions:

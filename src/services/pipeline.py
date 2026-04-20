@@ -6,9 +6,11 @@ import numpy as np
 
 try:
     from .renderer import render_result
+    from .region_rule_engine import RegionRuleEngine, RULE_NO_NON_MOTOR, RULE_NO_PARKING, RULE_NO_WRONG_WAY
     from ..core.plate_recognizer import PLATE_VEHICLE_TYPES, recognize_vehicle_plate
 except Exception:
     from services.renderer import render_result
+    from services.region_rule_engine import RegionRuleEngine, RULE_NO_NON_MOTOR, RULE_NO_PARKING, RULE_NO_WRONG_WAY
     from core.plate_recognizer import PLATE_VEHICLE_TYPES, recognize_vehicle_plate
 
 
@@ -24,6 +26,13 @@ def _to_float_point(point):
     if arr.size != 2:
         return []
     return [float(arr[0]), float(arr[1])]
+
+
+def _polygon_centroid(points):
+    arr = np.asarray(points, dtype=np.float32)
+    if arr.ndim != 2 or arr.shape[0] <= 0 or arr.shape[1] != 2:
+        return []
+    return [float(np.mean(arr[:, 0])), float(np.mean(arr[:, 1]))]
 
 
 def _normalize_lane_polygons(polygons):
@@ -139,6 +148,7 @@ def process_frame(
     plate_mode="violating_only",
     layers=None,
     lane_override_polygons=None,
+    scene_regions=None,
     timestamp=None,
     frame_index=None,
     timestamp_s=None,
@@ -146,19 +156,22 @@ def process_frame(
 ):
     plate_mode = _normalize_plate_mode(plate_mode)
     manual_lane_polygons = _normalize_lane_polygons(lane_override_polygons)
+    lane_violation_enabled = bool(manual_lane_polygons)
     if manual_lane_polygons:
         lane_polygons = manual_lane_polygons
-        lane_mask = _build_lane_mask(frame.shape, lane_polygons)
+        reference_lane_mask = _build_lane_mask(frame.shape, lane_polygons)
+        violation_lane_mask = reference_lane_mask
         lane_source = "manual"
     else:
-        lane_mask, lane_polygons = _detect_lane_region(frame, lane_detector)
-        lane_source = "auto" if (lane_mask is not None or lane_polygons) else "none"
+        reference_lane_mask, lane_polygons = _detect_lane_region(frame, lane_detector)
+        violation_lane_mask = None
+        lane_source = "auto" if (reference_lane_mask is not None or lane_polygons) else "none"
 
     vehicles = vehicle_detector.detect(frame, lane_polygons=lane_polygons)
-    lane_area_px = int(np.count_nonzero(lane_mask)) if lane_mask is not None else 0
+    lane_area_px = int(np.count_nonzero(reference_lane_mask)) if reference_lane_mask is not None else 0
+    violation_lane_area_px = int(np.count_nonzero(violation_lane_mask)) if violation_lane_mask is not None else 0
 
     detections = []
-    violation_count = 0
 
     for idx, veh in enumerate(vehicles, start=1):
         footprint = np.array(veh.get("footprint_2d", []), dtype=np.int32)
@@ -170,29 +183,11 @@ def process_frame(
             x1, y1, x2, y2 = [int(v) for v in bbox]
             footprint = np.array([[x1, y2], [x2, y2], [x2, y1], [x1, y1]], dtype=np.int32)
 
-        is_violating, ratio = violation_checker.check(footprint, lane_mask)
-        if is_violating:
-            violation_count += 1
-
-        plate_data = None
-        plate_attempted = False
-        if plate_recognizer is not None and bool(getattr(plate_recognizer, "enabled", False)):
-            plate_attempted = _should_attempt_plate_recognition(vehicle_type, is_violating, plate_mode)
-        if plate_attempted:
-            try:
-                plate_data = recognize_vehicle_plate(
-                    frame,
-                    bbox,
-                    plate_recognizer,
-                    vehicle_type=vehicle_type,
-                    frame_index=frame_index,
-                )
-            except Exception:
-                plate_data = None
+        is_violating, ratio = violation_checker.check(footprint, violation_lane_mask)
 
         footprint_area_px = float(abs(cv2.contourArea(footprint))) if footprint.shape[0] >= 3 else 0.0
         depth_hint = float(np.max(footprint[:, 1])) if footprint.shape[0] > 0 else 0.0
-        anchor = footprint[0].tolist() if footprint.shape[0] > 0 else None
+        anchor = _polygon_centroid(footprint) if footprint.shape[0] > 0 else []
         detection = {
             "index": idx,
             "vehicle_type": vehicle_type,
@@ -207,12 +202,10 @@ def process_frame(
             "footprint_area_px": footprint_area_px,
             "depth_hint": depth_hint,
             "label_anchor": anchor,
+            "track_anchor": list(anchor or []),
+            "track_hits": 1,
             "yaw": float(veh.get("yaw", 0.0)),
-            "plate_status": (
-                "detected"
-                if plate_data is not None
-                else ("not_found" if plate_attempted else "skipped")
-            ),
+            "plate_status": "skipped",
             "plate_text": "",
             "plate_confidence": 0.0,
             "plate_support_count": 0,
@@ -249,19 +242,62 @@ def process_frame(
                 "final_direction": _to_float_point(veh.get("yaw_debug", {}).get("final_direction", [])),
             },
         }
+        detections.append(detection)
+
+    region_rule_events = []
+    region_rule_summary = {
+        RULE_NO_PARKING: 0,
+        RULE_NO_NON_MOTOR: 0,
+        RULE_NO_WRONG_WAY: 0,
+    }
+    if scene_regions:
+        detections, region_rule_events, region_rule_summary = RegionRuleEngine(scene_regions).apply_image(
+            detections,
+            frame_index=frame_index,
+            timestamp_s=timestamp_s,
+        )
+
+    for detection in detections:
+        plate_data = None
+        plate_attempted = False
+        if plate_recognizer is not None and bool(getattr(plate_recognizer, "enabled", False)):
+            plate_attempted = _should_attempt_plate_recognition(
+                detection.get("vehicle_type", ""),
+                bool(detection.get("is_violating", False)),
+                plate_mode,
+            )
+        if plate_attempted:
+            try:
+                plate_data = recognize_vehicle_plate(
+                    frame,
+                    detection.get("bbox", [0, 0, 0, 0]),
+                    plate_recognizer,
+                    vehicle_type=detection.get("vehicle_type", ""),
+                    frame_index=frame_index,
+                )
+            except Exception:
+                plate_data = None
+        detection["plate_status"] = (
+            "detected"
+            if plate_data is not None
+            else ("not_found" if plate_attempted else "skipped")
+        )
         if plate_data is not None:
             detection.update(plate_data)
-        detections.append(detection)
+
+    violation_count = int(sum(1 for det in detections if bool(det.get("is_violating", False))))
 
     violating_plates, missing_plate_count = _summarize_violating_plates(detections)
 
-    rendered = render_result(frame, lane_mask, detections, layers=layers) if bool(render_output) else None
+    rendered = render_result(frame, reference_lane_mask, detections, layers=layers) if bool(render_output) else None
     result = {
         "timestamp": timestamp or datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "image_width": int(frame.shape[1]),
         "image_height": int(frame.shape[0]),
         "lane_area_px": lane_area_px,
         "lane_source": lane_source,
+        "lane_violation_enabled": bool(lane_violation_enabled),
+        "violation_lane_area_px": int(violation_lane_area_px),
         "vehicle_count": len(detections),
         "violation_count": violation_count,
         "any_violation": violation_count > 0,
@@ -269,6 +305,13 @@ def process_frame(
         "violating_plate_missing_count": int(missing_plate_count),
         "violating_plates": violating_plates,
         "lane_polygons": [polygon.tolist() for polygon in lane_polygons],
+        "violation_lane_polygons": [polygon.tolist() for polygon in manual_lane_polygons],
+        "scene_region_count": int(len(scene_regions or [])),
+        "region_rule_event_count": int(len(region_rule_events)),
+        "region_rule_no_parking_count": int(region_rule_summary.get(RULE_NO_PARKING, 0) or 0),
+        "region_rule_no_non_motor_count": int(region_rule_summary.get(RULE_NO_NON_MOTOR, 0) or 0),
+        "region_rule_no_wrong_way_count": int(region_rule_summary.get(RULE_NO_WRONG_WAY, 0) or 0),
+        "region_rule_events": list(region_rule_events or []),
         "detections": detections,
     }
     if frame_index is not None:
@@ -287,6 +330,7 @@ def process_image(
     plate_recognizer=None,
     layers=None,
     lane_override_polygons=None,
+    scene_regions=None,
 ):
     """
     Run full processing for one image and return a structured result package.
@@ -304,6 +348,7 @@ def process_image(
         plate_recognizer=plate_recognizer,
         layers=layers,
         lane_override_polygons=lane_override_polygons,
+        scene_regions=scene_regions,
     )
 
     output_dir = Path(output_dir)

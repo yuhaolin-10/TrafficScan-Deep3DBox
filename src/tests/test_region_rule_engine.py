@@ -321,3 +321,66 @@ def test_region_rule_engine_wrong_way_uses_overlap_even_if_anchor_is_outside():
     assert events[0]["rule_type"] == RULE_NO_WRONG_WAY
     assert summary[RULE_NO_WRONG_WAY] == 1
     assert detections[0]["is_violating"] is True
+
+
+def test_region_rule_engine_apply_image_triggers_no_non_motor():
+    engine = RegionRuleEngine(
+        _scene_region(
+            RULE_NO_NON_MOTOR,
+            params={"target_classes": ["bicycle"], "min_roi_overlap_ratio": 0.2},
+        )
+    )
+
+    detections, events, summary = engine.apply_image(
+        [
+            {
+                "track_id": "",
+                "vehicle_type": "bicycle",
+                "bbox": [20.0, 20.0, 40.0, 40.0],
+                "footprint": [[22.0, 42.0], [42.0, 42.0], [42.0, 22.0], [22.0, 22.0]],
+                "yaw_debug_vectors": {"final_direction": [1.0, 0.0]},
+                "is_violating": False,
+                "violation_ratio": 0.0,
+                "violation_type": "",
+            }
+        ],
+        frame_index=0,
+        timestamp_s=0.0,
+    )
+
+    assert len(events) == 1
+    assert events[0]["rule_type"] == RULE_NO_NON_MOTOR
+    assert summary[RULE_NO_NON_MOTOR] == 1
+    assert detections[0]["is_violating"] is True
+
+
+def test_region_rule_engine_apply_image_triggers_no_wrong_way_from_heading():
+    engine = RegionRuleEngine(
+        _scene_region(
+            RULE_NO_WRONG_WAY,
+            params={"wrong_way_dot_threshold": -0.2, "min_roi_overlap_ratio": 0.2},
+            direction_line=[[20, 50], [80, 50]],
+        )
+    )
+
+    detections, events, summary = engine.apply_image(
+        [
+            {
+                "track_id": "",
+                "vehicle_type": "car",
+                "bbox": [30.0, 40.0, 70.0, 60.0],
+                "footprint": [[32.0, 58.0], [68.0, 58.0], [68.0, 42.0], [32.0, 42.0]],
+                "yaw_debug_vectors": {"final_direction": [-1.0, 0.0]},
+                "is_violating": False,
+                "violation_ratio": 0.0,
+                "violation_type": "",
+            }
+        ],
+        frame_index=0,
+        timestamp_s=0.0,
+    )
+
+    assert len(events) == 1
+    assert events[0]["rule_type"] == RULE_NO_WRONG_WAY
+    assert summary[RULE_NO_WRONG_WAY] == 1
+    assert detections[0]["is_violating"] is True

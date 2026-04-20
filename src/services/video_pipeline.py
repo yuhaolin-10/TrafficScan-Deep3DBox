@@ -703,12 +703,21 @@ def process_video(
                     {
                         "track_id": track_id,
                         "vehicle_type": str(detection.get("vehicle_type", "vehicle")),
+                        "violation_labels": [],
                         "max_violation_ratio": 0.0,
                         "first_violation_frame": None,
                         "last_violation_frame": None,
                     },
                 )
                 track_meta["vehicle_type"] = str(detection.get("vehicle_type", track_meta["vehicle_type"]))
+                violation_labels = [
+                    str(item).strip()
+                    for item in str(detection.get("violation_type", "") or "").split(",")
+                    if str(item).strip()
+                ]
+                for label in violation_labels:
+                    if label not in track_meta["violation_labels"]:
+                        track_meta["violation_labels"].append(label)
                 track_meta["max_violation_ratio"] = max(
                     float(track_meta.get("max_violation_ratio", 0.0)),
                     float(detection.get("violation_ratio", 0.0) or 0.0),
@@ -946,6 +955,7 @@ def process_video(
         lane_source = "mixed"
 
     violating_track_plates = []
+    unread_violating_track_count = 0
     for track_id, meta in violating_track_meta.items():
         summary = _summarize_violation_plate_candidates(
             track_plate_candidates.get(track_id, []),
@@ -955,7 +965,8 @@ def process_video(
             min_confidence=0.0,
         )
         if summary is None:
-            continue
+            unread_violating_track_count += 1
+            summary = {}
         violating_track_plates.append(
             {
                 "track_id": str(track_id),
@@ -965,6 +976,7 @@ def process_video(
                 "plate_support_count": int(summary.get("plate_support_count", 0) or 0),
                 "plate_type": str(summary.get("plate_type", "") or ""),
                 "source_frame_indices": [int(v) for v in list(summary.get("plate_source_frame_indices", []))],
+                "violation_labels": [str(label) for label in list(meta.get("violation_labels", [])) if str(label).strip()],
                 "max_violation_ratio": float(meta.get("max_violation_ratio", 0.0) or 0.0),
                 "first_violation_frame": None
                 if meta.get("first_violation_frame") is None
@@ -982,7 +994,6 @@ def process_video(
         ),
         reverse=True,
     )
-    unread_violating_track_count = max(0, len(violating_track_meta) - len(violating_track_plates))
 
     if preview_metadata_handle is not None:
         try:

@@ -13,6 +13,7 @@ try:
     from .viewer_panel import ViewerPanel
     from .workspace_panel import WorkspacePanel
     from .violations_table import RegionRulesPanel
+    from .lane_recognition_worker import LaneRecognitionWorker
     from .processing_worker import ProcessingWorker
     from .video_processing_worker import VideoProcessingWorker
     from ..services.renderer import render_result
@@ -24,6 +25,7 @@ except Exception:
         from gui.viewer_panel import ViewerPanel
         from gui.workspace_panel import WorkspacePanel
         from gui.violations_table import RegionRulesPanel
+        from gui.lane_recognition_worker import LaneRecognitionWorker
         from gui.processing_worker import ProcessingWorker
         from gui.video_processing_worker import VideoProcessingWorker
         from services.renderer import render_result
@@ -34,6 +36,7 @@ except Exception:
         from viewer_panel import ViewerPanel
         from workspace_panel import WorkspacePanel
         from violations_table import RegionRulesPanel
+        from lane_recognition_worker import LaneRecognitionWorker
         from processing_worker import ProcessingWorker
         from video_processing_worker import VideoProcessingWorker
         from services.renderer import render_result
@@ -51,6 +54,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._is_running = False
         self._run_thread = None
         self._run_worker = None
+        self._lane_recognition_thread = None
+        self._lane_recognition_worker = None
+        self._lane_recognition_target_path = ""
         self._run_label = ""
         self._run_started_at = 0.0
         self._run_stop_requested = False
@@ -176,6 +182,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.viewer_panel.image_hovered.connect(self._on_viewer_image_hovered)
         self.viewer_panel.image_hover_left.connect(self._on_viewer_image_hover_left)
         self.viewer_panel.layer_toggled.connect(self._on_layer_toggled)
+        self.viewer_panel.lane_recognition_requested.connect(self._on_lane_recognition_requested)
         self.viewer_panel.manual_roi_start_requested.connect(self._on_manual_roi_start_requested)
         self.viewer_panel.manual_roi_finish_requested.connect(self._on_manual_roi_finish_requested)
         self.viewer_panel.manual_roi_clear_requested.connect(self._on_manual_roi_clear_requested)
@@ -223,7 +230,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _refresh_primary_actions(self):
         has_targets = len(self.workspace.checked_paths()) > 0
-        self.btn_start_analysis.setEnabled(has_targets and not self._is_running)
+        is_busy = self._is_running or self._lane_recognition_worker is not None
+        self.btn_start_analysis.setEnabled(has_targets and not is_busy)
 
     def _show_notice(self, level: str, message: str, *, duration_ms: int = 2600):
         self.notice_bar.setVisible(False)
@@ -257,6 +265,124 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             percent = int(round((float(value) / float(maximum)) * 100.0))
             self.run_feedback_bar.setFormat(f"{percent}%")
+
+    def _reset_feedback_when_idle(self):
+        if self._is_running or self._lane_recognition_worker is not None:
+            return
+        self._set_run_feedback(visible=False, text="等待分析", value=0, maximum=100, progress_text="0%")
+
+    def _on_lane_recognition_requested(self):
+        if self._is_running:
+            self._show_notice("warning", "分析进行中，请先等待当前任务结束", duration_ms=2400)
+            return
+        if self._lane_recognition_worker is not None:
+            self._show_notice("warning", "正在识别应急车道，请稍候", duration_ms=2200)
+            return
+
+        current = self.workspace.selected_path()
+        if not current:
+            self._show_notice("warning", "请先从左侧选择一个图片或视频", duration_ms=2200)
+            return
+
+        runtime = self._runtime_paths()
+        self._lane_recognition_target_path = str(current)
+        self._lane_recognition_thread = QtCore.QThread(self)
+        self._lane_recognition_worker = LaneRecognitionWorker(
+            current,
+            runtime["lane_model_path"],
+            is_video=self._is_video_path(current),
+        )
+        self._lane_recognition_worker.moveToThread(self._lane_recognition_thread)
+
+        self.viewer_panel.set_lane_recognition_busy(True)
+        self._refresh_primary_actions()
+        self._set_run_feedback(
+            visible=True,
+            text=f"正在识别应急车道 · {Path(current).name}",
+            value=0,
+            maximum=100,
+            progress_text="0%",
+        )
+
+        self._lane_recognition_thread.started.connect(self._lane_recognition_worker.run)
+        self._lane_recognition_worker.log.connect(self._log)
+        self._lane_recognition_worker.progress.connect(self._on_lane_recognition_progress)
+        self._lane_recognition_worker.task_finished.connect(self._on_lane_recognition_finished)
+        self._lane_recognition_worker.task_failed.connect(self._on_lane_recognition_failed)
+        self._lane_recognition_worker.finished.connect(self._lane_recognition_thread.quit)
+        self._lane_recognition_worker.finished.connect(self._lane_recognition_worker.deleteLater)
+        self._lane_recognition_thread.finished.connect(self._on_lane_recognition_thread_finished)
+        self._lane_recognition_thread.finished.connect(self._lane_recognition_thread.deleteLater)
+        self._lane_recognition_thread.start()
+
+    def _on_lane_recognition_progress(self, value: int, text: str):
+        self._set_run_feedback(
+            visible=True,
+            text=str(text or "正在识别应急车道"),
+            value=max(0, min(100, int(value))),
+            maximum=100,
+            progress_text=f"{max(0, min(100, int(value)))}%",
+        )
+
+    def _on_lane_recognition_finished(self, media_path: str, payload: dict):
+        normalized_path = self._norm_path(media_path)
+        lane_polygons = list(dict(payload or {}).get("lane_polygons", []) or [])
+        if not lane_polygons:
+            self._show_notice("warning", "未识别到可用的应急车道区域", duration_ms=2600)
+            self._log("warning", f"No emergency lane polygons detected for {Path(media_path).name}")
+            self._reset_feedback_when_idle()
+            return
+
+        replace_result = self._replace_auto_lane_regions(media_path, lane_polygons)
+        if replace_result is None:
+            self._show_notice("warning", "未识别到可用的应急车道区域", duration_ms=2600)
+            self._log("warning", f"No valid emergency lane polygons were normalized for {Path(media_path).name}")
+            self._reset_feedback_when_idle()
+            return
+
+        first_new_index, auto_count = replace_result
+        stale_count = self._invalidate_stale_results_after_rule_change(media_path)
+        current = self.workspace.selected_path()
+        if current and self._norm_path(current) == normalized_path:
+            if self._is_video_path(media_path):
+                self._set_video_preview(media_path, result=None)
+                self._set_video_playing(False)
+                self._set_video_playback_frame(0, reset_view=False)
+            else:
+                self.viewer_panel.set_image_path(media_path)
+            self._apply_manual_roi_to_viewer(media_path, selected_index=first_new_index)
+            self._show_details_for_path(media_path)
+
+        self._set_run_feedback(
+            visible=True,
+            text=f"应急车道识别完成 · {Path(media_path).name}",
+            value=100,
+            maximum=100,
+            progress_text="100%",
+        )
+        self._show_notice("success", f"已识别 {auto_count} 个应急车道候选区域", duration_ms=2600)
+        self._log("success", f"Recognized {auto_count} emergency lane region(s) for {Path(media_path).name}")
+        if stale_count > 0:
+            self._log("info", f"Cleared {stale_count} stale result(s) after refreshing emergency lane geometry")
+
+    def _on_lane_recognition_failed(self, media_path: str, error: str):
+        self._set_run_feedback(
+            visible=True,
+            text=f"应急车道识别失败 · {Path(media_path).name}",
+            value=0,
+            maximum=100,
+            progress_text="0%",
+        )
+        self._show_notice("warning", f"应急车道识别失败：{error}", duration_ms=3200)
+        self._log("error", f"Emergency lane recognition failed for {Path(media_path).name}: {error}")
+
+    def _on_lane_recognition_thread_finished(self):
+        self._lane_recognition_thread = None
+        self._lane_recognition_worker = None
+        self._lane_recognition_target_path = ""
+        self.viewer_panel.set_lane_recognition_busy(False)
+        self._refresh_primary_actions()
+        QtCore.QTimer.singleShot(1200, self._reset_feedback_when_idle)
 
     def _set_preview(self, file_path: str):
         key = self._norm_path(file_path)
@@ -570,6 +696,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _default_region_rule_params(self, rule_type: str) -> dict:
         key = str(rule_type or "").strip().lower()
+        if key == "emergency_lane_occupation":
+            return {}
         if key == "no_parking":
             return {
                 "target_classes": ["car", "truck", "bus", "motorcycle"],
@@ -596,6 +724,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _rule_display_name(self, rule_type: str) -> str:
         mapping = {
+            "emergency_lane_occupation": "占用应急车道",
             "no_parking": "禁止停车",
             "no_non_motor": "禁止非机动车",
             "no_wrong_way": "禁止逆行",
@@ -730,7 +859,13 @@ class MainWindow(QtWidgets.QMainWindow):
                         "source": "auto",
                         "enabled": True,
                         "direction_line": [],
-                        "rule_bindings": [],
+                        "rule_bindings": [
+                            {
+                                "rule_type": "emergency_lane_occupation",
+                                "enabled": True,
+                                "params": self._default_region_rule_params("emergency_lane_occupation"),
+                            }
+                        ],
                     },
                 )
             )
@@ -811,6 +946,22 @@ class MainWindow(QtWidgets.QMainWindow):
         region_key = self._region_key_for_path(file_path)
         self._manual_roi_cache[region_key] = self._normalize_scene_regions(entries)
 
+    def _replace_auto_lane_regions(self, file_path: str, lane_polygons):
+        auto_entries = self._build_auto_lane_region_entries(lane_polygons)
+        if not auto_entries:
+            return None
+        existing_entries = self._load_scene_regions(file_path)
+        preserved_entries = [
+            entry
+            for entry in existing_entries
+            if str(entry.get("source", "manual") or "manual").strip().lower() != "auto"
+        ]
+        first_new_index = len(preserved_entries)
+        merged_entries = preserved_entries + auto_entries
+        self._set_cached_scene_regions(file_path, merged_entries)
+        self._save_scene_regions(file_path, merged_entries)
+        return first_new_index, len(auto_entries)
+
     def _save_scene_regions(self, file_path: str, entries):
         profile_path = self._region_profile_path_for_path(file_path)
         region_key = self._region_key_for_path(file_path)
@@ -884,6 +1035,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 if bool(binding.get("enabled", True)) and str(binding.get("rule_type", "") or "").strip()
             ]
         )
+
+    def _region_supports_emergency_lane(self, entry) -> bool:
+        return self._region_rule_enabled(entry, "emergency_lane_occupation")
 
     def _load_video_info(self, file_path: str):
         key = self._norm_path(file_path)
@@ -1048,6 +1202,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.viewer_panel.start_region_direction_drawing(int(region_index))
             self._show_notice("info", "请在选中区域内点击两次设置允许方向", duration_ms=2600)
         rule_name = {
+            "emergency_lane_occupation": "占用应急车道",
             "no_parking": "禁止停车",
             "no_non_motor": "禁止非机动车",
             "no_wrong_way": "禁止逆行",
@@ -1074,6 +1229,7 @@ class MainWindow(QtWidgets.QMainWindow):
         entries[int(region_index)]["direction_line"] = []
         self._set_cached_scene_regions(current, entries)
         self._save_scene_regions(current, entries)
+        self._invalidate_stale_results_after_rule_change(current)
         self._apply_manual_roi_to_viewer(current, selected_index=region_index)
         self._show_details_for_path(current)
         self._show_notice("success", f"区域 {int(region_index) + 1}：已清除允许方向", duration_ms=2200)
@@ -1159,6 +1315,7 @@ class MainWindow(QtWidgets.QMainWindow):
         entries[region_index] = self._create_region_entry(entry.get("points", []), index=region_index, existing=entry)
         self._set_cached_scene_regions(file_path, entries)
         self._save_scene_regions(file_path, entries)
+        self._invalidate_stale_results_after_rule_change(file_path)
         self._apply_manual_roi_to_viewer(file_path, selected_index=region_index)
         self._show_details_for_path(file_path)
         return entries[region_index]
@@ -1181,6 +1338,10 @@ class MainWindow(QtWidgets.QMainWindow):
         title_action = menu.addAction(str(entry.get("name", f"Region {int(region_index) + 1}")))
         title_action.setEnabled(False)
         menu.addSeparator()
+
+        act_emergency_lane = menu.addAction("占用应急车道")
+        act_emergency_lane.setCheckable(True)
+        act_emergency_lane.setChecked(self._region_rule_enabled(entry, "emergency_lane_occupation"))
 
         act_no_parking = menu.addAction("禁止停车")
         act_no_parking.setCheckable(True)
@@ -1211,6 +1372,14 @@ class MainWindow(QtWidgets.QMainWindow):
             anchor = QtGui.QCursor.pos()
         chosen = exec_menu(anchor)
         if chosen is None:
+            return
+
+        if chosen == act_emergency_lane:
+            enabled = bool(act_emergency_lane.isChecked())
+            self._set_region_rule_enabled(current, region_index, "emergency_lane_occupation", enabled)
+            state_text = "enabled" if enabled else "disabled"
+            self._show_notice("success", f"区域 {region_index + 1}：占用应急车道已{'启用' if enabled else '关闭'}", duration_ms=2200)
+            self._log("success", f"Region {region_index + 1}: 占用应急车道 {state_text}")
             return
 
         if chosen == act_no_parking:
@@ -1253,6 +1422,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 entries[int(region_index)]["direction_line"] = []
                 self._set_cached_scene_regions(current, entries)
                 self._save_scene_regions(current, entries)
+                self._invalidate_stale_results_after_rule_change(current)
                 self._apply_manual_roi_to_viewer(current, selected_index=region_index)
                 self._show_details_for_path(current)
                 self._show_notice("success", f"区域 {region_index + 1}：已清除允许方向", duration_ms=2200)
@@ -1285,6 +1455,7 @@ class MainWindow(QtWidgets.QMainWindow):
         entries[int(region_index)]["direction_line"] = self._normalize_direction_line(direction_line)
         self._set_cached_scene_regions(current, entries)
         self._save_scene_regions(current, entries)
+        self._invalidate_stale_results_after_rule_change(current)
         self._apply_manual_roi_to_viewer(current, selected_index=region_index)
         self._show_details_for_path(current)
         if len(entries[int(region_index)]["direction_line"]) == 2:
@@ -1328,16 +1499,37 @@ class MainWindow(QtWidgets.QMainWindow):
             polygons = [
                 [list(point) for point in entry.get("points", [])]
                 for entry in entries
-                if len(entry.get("points", [])) >= 3 and bool(entry.get("enabled", True))
+                if (
+                    len(entry.get("points", [])) >= 3
+                    and bool(entry.get("enabled", True))
+                    and self._region_supports_emergency_lane(entry)
+                )
             ]
             if polygons:
                 mapping[self._norm_path(path)] = polygons
         return mapping
 
+    def _scene_rule_engine_entries(self, entries):
+        supported_rule_types = {"no_parking", "no_non_motor", "no_wrong_way"}
+        filtered_entries = []
+        for entry in self._normalize_scene_regions(entries):
+            bindings = [
+                binding
+                for binding in list(entry.get("rule_bindings", []) or [])
+                if str(binding.get("rule_type", "") or "").strip().lower() in supported_rule_types
+                and bool(binding.get("enabled", True))
+            ]
+            if not bindings:
+                continue
+            payload = dict(entry)
+            payload["rule_bindings"] = bindings
+            filtered_entries.append(payload)
+        return filtered_entries
+
     def _scene_region_mapping_for_paths(self, paths):
         mapping = {}
         for path in paths:
-            entries = self._load_scene_regions(path)
+            entries = self._scene_rule_engine_entries(self._load_scene_regions(path))
             if entries:
                 mapping[self._norm_path(path)] = entries
         return mapping
@@ -1543,6 +1735,18 @@ class MainWindow(QtWidgets.QMainWindow):
             removed += 1
         return int(removed)
 
+    def _invalidate_stale_results_after_rule_change(self, file_path: str) -> int:
+        if self._is_running:
+            return 0
+        removed = self._invalidate_results_for_scene(file_path)
+        if removed > 0:
+            self._selected_detection_index = None
+            self._hover_detection_index = None
+            current = self.workspace.selected_path()
+            if current and self._norm_path(current) == self._norm_path(file_path):
+                self._set_preview(file_path)
+        return int(removed)
+
     def _run_selected(self):
         if self.workspace.list.count() == 0:
             self._show_notice("warning", "工作区为空，请先导入素材")
@@ -1630,11 +1834,12 @@ class MainWindow(QtWidgets.QMainWindow):
     def _start_image_stage(self, paths: list):
         runtime = self._runtime_paths()
         manual_mapping = self._manual_lane_mapping_for_paths(paths)
+        scene_region_mapping = self._scene_region_mapping_for_paths(paths)
         stage_number = int(self._run_plan_index) + 1
         stage_total = max(1, len(self._run_plan))
         self._log(
             "info",
-            f"{self._run_label}: stage {stage_number}/{stage_total}, {len(paths)} image(s), manual ROI applied to {len(manual_mapping)} image(s)",
+            f"{self._run_label}: stage {stage_number}/{stage_total}, {len(paths)} image(s), emergency-lane regions on {len(manual_mapping)} image(s), scene rules on {len(scene_region_mapping)} image(s)",
         )
 
         self._run_thread = QtCore.QThread(self)
@@ -1648,6 +1853,7 @@ class MainWindow(QtWidgets.QMainWindow):
             location="GUI-Camera-01",
             layers=self._processing_layers_state(),
             manual_lane_polygons_by_path=manual_mapping,
+            scene_regions_by_path=scene_region_mapping,
         )
         self._run_worker.moveToThread(self._run_thread)
 
@@ -1692,6 +1898,7 @@ class MainWindow(QtWidgets.QMainWindow):
             vehicle_model_path=runtime["vehicle_model_path"],
             output_dir=runtime["video_output_dir"],
             preview_dir=runtime["video_preview_dir"],
+            db_path=runtime["db_path"],
             threshold=0.3,
             layers=self._processing_layers_state(),
             manual_lane_polygons_by_path=manual_mapping,
@@ -1838,7 +2045,6 @@ class MainWindow(QtWidgets.QMainWindow):
         key = self._norm_path(image_path)
         self._video_progress_log_state.pop(key, None)
         self._results_by_path[key] = result
-        self._sync_auto_lane_regions_from_result(image_path, result)
         self.workspace.set_status_for_path(image_path, self.workspace.STATUS_DONE)
         self.workspace.set_failure_reason_for_path(image_path, "")
 
@@ -1895,9 +2101,17 @@ class MainWindow(QtWidgets.QMainWindow):
         vehicles = int(result.get("vehicle_count", 0))
         violations = int(result.get("violation_count", 0))
         lane_source = str(result.get("lane_source", "auto"))
+        lane_violation_enabled = bool(result.get("lane_violation_enabled", False))
+        region_rule_suffix = ""
+        scene_region_count = int(result.get("scene_region_count", 0) or 0)
+        if scene_region_count > 0:
+            region_rule_suffix = (
+                f", region_rules={int(result.get('region_rule_event_count', 0) or 0)}"
+                f" [no_non_motor={int(result.get('region_rule_no_non_motor_count', 0) or 0)}, no_wrong_way={int(result.get('region_rule_no_wrong_way_count', 0) or 0)}]"
+            )
         self._log(
             "success",
-            f"Done {global_index}/{global_total}: {Path(image_path).name}, vehicles={vehicles}, violations={violations}, lane={lane_source}, elapsed={elapsed:.1f}s",
+            f"Done {global_index}/{global_total}: {Path(image_path).name}, vehicles={vehicles}, violations={violations}, lane={lane_source}, lane_violation={'on' if lane_violation_enabled else 'off'}{region_rule_suffix}, elapsed={elapsed:.1f}s",
         )
 
     def _on_task_failed(self, image_path: str, error: str, index: int, total: int):

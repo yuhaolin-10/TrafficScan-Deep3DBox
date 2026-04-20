@@ -27,6 +27,24 @@ class _DummyVehicleDetector:
         return []
 
 
+class _SingleVehicleDetector:
+    def detect(self, _frame, lane_polygons=None):
+        return [
+            {
+                "bbox": [8.0, 8.0, 24.0, 24.0],
+                "type": "car",
+                "conf": 0.9,
+                "footprint_2d": [[8, 24], [24, 24], [24, 8], [8, 8]],
+                "corners_2d": [],
+                "mask_polygon_2d": [],
+                "yaw": 0.0,
+                "yaw_debug": {},
+                "geometry_debug": {"vehicle_center_2d": [16.0, 16.0]},
+                "lane_prior": {},
+            }
+        ]
+
+
 class _DummyViolationChecker:
     def __init__(self):
         self.last_lane_mask = None
@@ -34,6 +52,15 @@ class _DummyViolationChecker:
     def check(self, _footprint, _lane_mask):
         self.last_lane_mask = _lane_mask
         return False, 0.0
+
+
+class _LaneAwareViolationChecker:
+    def __init__(self):
+        self.last_lane_mask = None
+
+    def check(self, _footprint, lane_mask):
+        self.last_lane_mask = lane_mask
+        return lane_mask is not None, 1.0 if lane_mask is not None else 0.0
 
 
 class _DummyLaneDetector:
@@ -208,7 +235,7 @@ def test_process_frame_uses_auto_lane_segmentation_when_no_manual_override():
     result, rendered = process_frame(
         frame,
         lane_detector=lane_detector,
-        vehicle_detector=_DummyVehicleDetector(),
+        vehicle_detector=_SingleVehicleDetector(),
         violation_checker=violation_checker,
         render_output=False,
     )
@@ -218,3 +245,24 @@ def test_process_frame_uses_auto_lane_segmentation_when_no_manual_override():
     assert result["lane_source"] == "auto"
     assert len(result["lane_polygons"]) == 1
     assert result["lane_area_px"] > 0
+
+
+def test_process_frame_does_not_enable_lane_violation_without_explicit_lane_region():
+    frame = np.zeros((32, 32, 3), dtype=np.uint8)
+    lane_detector = _DummyLaneDetector()
+    violation_checker = _LaneAwareViolationChecker()
+
+    result, rendered = process_frame(
+        frame,
+        lane_detector=lane_detector,
+        vehicle_detector=_DummyVehicleDetector(),
+        violation_checker=violation_checker,
+        render_output=False,
+    )
+
+    assert rendered is None
+    assert lane_detector.detect_calls == 1
+    assert result["lane_source"] == "auto"
+    assert result["lane_violation_enabled"] is False
+    assert result["violation_count"] == 0
+    assert violation_checker.last_lane_mask is None

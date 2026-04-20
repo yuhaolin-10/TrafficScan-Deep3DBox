@@ -12,6 +12,7 @@ try:
     from ..core.plate_recognizer import create_plate_recognizer
     from ..core.vehicle_detector_deep3dbox import VehicleDetector3D
     from ..core.violation_checker import ViolationChecker
+    from ..services.database_manager import DatabaseManager
     from ..services.video_pipeline import process_video
 except Exception:
     try:
@@ -22,6 +23,7 @@ except Exception:
     from core.plate_recognizer import create_plate_recognizer
     from core.vehicle_detector_deep3dbox import VehicleDetector3D
     from core.violation_checker import ViolationChecker
+    from services.database_manager import DatabaseManager
     from services.video_pipeline import process_video
 
 
@@ -48,6 +50,7 @@ class VideoProcessingWorker(QtCore.QObject):
         vehicle_model_path,
         output_dir,
         preview_dir,
+        db_path,
         threshold=0.3,
         layers=None,
         manual_lane_polygons_by_path=None,
@@ -63,6 +66,7 @@ class VideoProcessingWorker(QtCore.QObject):
         self.vehicle_model_path = str(vehicle_model_path)
         self.output_dir = str(output_dir)
         self.preview_dir = str(preview_dir)
+        self.db_path = str(db_path)
         self.threshold = float(threshold)
         self.layers = dict(layers or {})
         self.frame_stride = max(1, int(frame_stride))
@@ -125,9 +129,11 @@ class VideoProcessingWorker(QtCore.QObject):
             self.finished.emit()
             return
 
+        db_manager = None
         try:
             self.log.emit("info", "Loading lane segmentation and Deep3DBox models for video processing...")
             lane_detector, vehicle_detector, violation_checker, plate_recognizer = self._create_components()
+            db_manager = DatabaseManager(self.db_path)
             if lane_detector is not None:
                 self.log.emit("success", "Emergency-lane segmentation is enabled for video processing")
             else:
@@ -152,7 +158,9 @@ class VideoProcessingWorker(QtCore.QObject):
                     self.log.emit("warning", "Video processing was interrupted by a newer run request")
                     break
                 self.task_started.emit(video_path, index, total)
+                record_id = -1
                 try:
+                    record_id = db_manager.start_record(video_path, media_type=DatabaseManager.MEDIA_VIDEO)
                     result = self._process_video(
                         video_path,
                         lane_detector,
@@ -161,14 +169,24 @@ class VideoProcessingWorker(QtCore.QObject):
                         plate_recognizer,
                         progress_callback=lambda payload, path=video_path, idx=index, total_count=total: self.task_progress.emit(path, payload, idx, total_count),
                     )
+                    if record_id <= 0:
+                        raise RuntimeError("Failed to create running database record")
+                    db_manager.complete_record_success(record_id, result)
+                    result["record_id"] = int(record_id)
                     self.task_finished.emit(video_path, result, index, total)
                     if self.is_stop_requested():
                         self.log.emit("warning", "Video processing stop requested, remaining files were skipped")
                         break
                 except InterruptedError:
+                    if record_id and record_id > 0:
+                        db_manager.mark_record_failed(record_id, "Interrupted")
                     self.log.emit("warning", f"Video processing interrupted: {Path(video_path).name}")
                     break
                 except Exception as exc:
+                    if record_id and record_id > 0:
+                        db_manager.mark_record_failed(record_id, exc)
                     self.task_failed.emit(video_path, str(exc), index, total)
         finally:
+            if db_manager is not None:
+                db_manager.close()
             self.finished.emit()

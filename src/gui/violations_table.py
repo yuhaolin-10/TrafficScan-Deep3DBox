@@ -122,9 +122,11 @@ class RegionRulesPanel(QtWidgets.QFrame):
         region_root.addWidget(self.lbl_region_hint)
         self.lbl_region_hint.setVisible(False)
 
+        self.chk_emergency_lane = QtWidgets.QCheckBox("占用应急车道")
         self.chk_no_parking = QtWidgets.QCheckBox("禁止停车")
         self.chk_no_non_motor = QtWidgets.QCheckBox("禁止非机动车")
         self.chk_no_wrong_way = QtWidgets.QCheckBox("禁止逆行")
+        region_root.addWidget(self.chk_emergency_lane)
         region_root.addWidget(self.chk_no_parking)
         region_root.addWidget(self.chk_no_non_motor)
         region_root.addWidget(self.chk_no_wrong_way)
@@ -171,6 +173,7 @@ class RegionRulesPanel(QtWidgets.QFrame):
         root.addWidget(header, 0)
         root.addWidget(self.scroll, 1)
 
+        self.chk_emergency_lane.toggled.connect(lambda checked: self._emit_rule_toggle("emergency_lane_occupation", checked))
         self.chk_no_parking.toggled.connect(lambda checked: self._emit_rule_toggle("no_parking", checked))
         self.chk_no_non_motor.toggled.connect(lambda checked: self._emit_rule_toggle("no_non_motor", checked))
         self.chk_no_wrong_way.toggled.connect(lambda checked: self._emit_rule_toggle("no_wrong_way", checked))
@@ -243,6 +246,7 @@ class RegionRulesPanel(QtWidgets.QFrame):
 
     def _rule_label(self, rule_type: str) -> str:
         mapping = {
+            "emergency_lane_occupation": "占用应急车道",
             "no_parking": "禁止停车",
             "no_non_motor": "禁止非机动车",
             "no_wrong_way": "禁止逆行",
@@ -331,6 +335,10 @@ class RegionRulesPanel(QtWidgets.QFrame):
                 bucket["plate_text"] = str(plate_item.get("plate_text", "") or "").strip()
                 bucket["plate_confidence"] = float(plate_item.get("plate_confidence", 0.0) or 0.0)
                 bucket["plate_support_count"] = int(plate_item.get("plate_support_count", 0) or 0)
+                for label in list(plate_item.get("violation_labels", []) or []):
+                    label = self._violation_label(label)
+                    if label and label not in bucket["rule_labels"]:
+                        bucket["rule_labels"].append(label)
                 if bucket.get("first_frame_index") is None and plate_item.get("first_violation_frame") is not None:
                     bucket["first_frame_index"] = int(plate_item.get("first_violation_frame"))
 
@@ -429,14 +437,17 @@ class RegionRulesPanel(QtWidgets.QFrame):
         self.lbl_region_name.setText(region_name)
         self.lbl_region_status.setText("已启用" if enabled else "未启用")
 
+        self.chk_emergency_lane.blockSignals(True)
         self.chk_no_parking.blockSignals(True)
         self.chk_no_non_motor.blockSignals(True)
         self.chk_no_wrong_way.blockSignals(True)
         try:
+            self.chk_emergency_lane.setChecked(bool(rule_types.get("emergency_lane_occupation", False)))
             self.chk_no_parking.setChecked(bool(rule_types.get("no_parking", False)))
             self.chk_no_non_motor.setChecked(bool(rule_types.get("no_non_motor", False)))
             self.chk_no_wrong_way.setChecked(bool(rule_types.get("no_wrong_way", False)))
         finally:
+            self.chk_emergency_lane.blockSignals(False)
             self.chk_no_parking.blockSignals(False)
             self.chk_no_non_motor.blockSignals(False)
             self.chk_no_wrong_way.blockSignals(False)

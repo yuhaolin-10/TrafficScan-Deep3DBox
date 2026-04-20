@@ -19,6 +19,7 @@ class ViewerPanel(QtWidgets.QFrame):
     image_hovered = QtCore.pyqtSignal(int, int) if hasattr(QtCore, "pyqtSignal") else QtCore.Signal(int, int)
     image_hover_left = QtCore.pyqtSignal() if hasattr(QtCore, "pyqtSignal") else QtCore.Signal()
     layer_toggled = QtCore.pyqtSignal(str, bool) if hasattr(QtCore, "pyqtSignal") else QtCore.Signal(str, bool)
+    lane_recognition_requested = QtCore.pyqtSignal() if hasattr(QtCore, "pyqtSignal") else QtCore.Signal()
     manual_roi_start_requested = QtCore.pyqtSignal() if hasattr(QtCore, "pyqtSignal") else QtCore.Signal()
     manual_roi_finish_requested = QtCore.pyqtSignal() if hasattr(QtCore, "pyqtSignal") else QtCore.Signal()
     manual_roi_clear_requested = QtCore.pyqtSignal() if hasattr(QtCore, "pyqtSignal") else QtCore.Signal()
@@ -51,6 +52,7 @@ class ViewerPanel(QtWidgets.QFrame):
         self._preview_display_mode = "仅显示底面"
         self._scene_loaded = False
         self._updating_video_slider = False
+        self._lane_recognition_busy = False
 
         self.setStyleSheet("background:#0b1220;")
 
@@ -80,11 +82,13 @@ class ViewerPanel(QtWidgets.QFrame):
         toolbar_row.addWidget(tools_title, 0)
 
         self.btn_roi_draw = self._make_action_button("框选车道")
+        self.btn_lane_recognize = self._make_action_button("识别应急车道")
         self.btn_roi_finish = self._make_action_button("完成框选")
         self.btn_roi_clear = self._make_action_button("清空区域")
         self.btn_roi_save = self._make_action_button("保存规则")
         self.btn_roi_save.setVisible(False)
         toolbar_row.addWidget(self.btn_roi_draw, 0)
+        toolbar_row.addWidget(self.btn_lane_recognize, 0)
         toolbar_row.addWidget(self.btn_roi_finish, 0)
         toolbar_row.addWidget(self.btn_roi_clear, 0)
         toolbar_row.addWidget(self.btn_roi_save, 0)
@@ -201,6 +205,7 @@ class ViewerPanel(QtWidgets.QFrame):
         self.viewer.region_direction_drawing_changed.connect(self._on_region_direction_drawing_changed)
 
         self.btn_roi_draw.clicked.connect(self.manual_roi_start_requested.emit)
+        self.btn_lane_recognize.clicked.connect(self.lane_recognition_requested.emit)
         self.btn_roi_finish.clicked.connect(self.manual_roi_finish_requested.emit)
         self.btn_roi_clear.clicked.connect(self.manual_roi_clear_requested.emit)
         self.btn_roi_save.clicked.connect(self.manual_roi_save_requested.emit)
@@ -343,14 +348,20 @@ class ViewerPanel(QtWidgets.QFrame):
         has_regions = len(self.viewer.manual_roi_regions()) > 0
         is_drawing = self.viewer.is_manual_roi_drawing()
         is_direction = self.viewer.is_region_direction_drawing()
-        can_edit = self._scene_loaded and not is_direction
+        can_edit = self._scene_loaded and not is_direction and not self._lane_recognition_busy
         self.btn_roi_draw.setEnabled(can_edit and not is_drawing)
+        self.btn_lane_recognize.setEnabled(can_edit and not is_drawing)
         self.btn_roi_finish.setEnabled(can_edit and is_drawing)
-        self.btn_roi_clear.setEnabled(self._scene_loaded and has_regions and not is_direction)
-        self.btn_roi_save.setEnabled(self._scene_loaded and not is_drawing and not is_direction)
+        self.btn_roi_clear.setEnabled(self._scene_loaded and has_regions and not is_direction and not self._lane_recognition_busy)
+        self.btn_roi_save.setEnabled(self._scene_loaded and not is_drawing and not is_direction and not self._lane_recognition_busy)
 
     def layers_state(self):
         return dict(self._processing_layers_state)
+
+    def set_lane_recognition_busy(self, busy: bool):
+        self._lane_recognition_busy = bool(busy)
+        self.btn_lane_recognize.setText("识别中..." if self._lane_recognition_busy else "识别应急车道")
+        self._refresh_toolbar_state()
 
     def show_empty_state(self):
         self._scene_loaded = False

@@ -1,4 +1,5 @@
 ﻿import sys
+import sys
 import threading
 from pathlib import Path
 
@@ -50,6 +51,7 @@ class ProcessingWorker(QtCore.QObject):
         location="Camera01",
         layers=None,
         manual_lane_polygons_by_path=None,
+        scene_regions_by_path=None,
         parent=None,
     ):
         super().__init__(parent)
@@ -65,6 +67,10 @@ class ProcessingWorker(QtCore.QObject):
         self.manual_lane_polygons_by_path = {
             str(Path(path).resolve(strict=False)): list(polygons or [])
             for path, polygons in dict(manual_lane_polygons_by_path or {}).items()
+        }
+        self.scene_regions_by_path = {
+            str(Path(path).resolve(strict=False)): list(regions or [])
+            for path, regions in dict(scene_regions_by_path or {}).items()
         }
 
     def request_stop(self):
@@ -114,7 +120,9 @@ class ProcessingWorker(QtCore.QObject):
                 self.task_started.emit(image_path, index, total)
                 record_id = db_manager.start_record(image_path)
                 try:
-                    lane_override = self.manual_lane_polygons_by_path.get(str(Path(image_path).resolve(strict=False)))
+                    normalized_path = str(Path(image_path).resolve(strict=False))
+                    lane_override = self.manual_lane_polygons_by_path.get(normalized_path)
+                    scene_regions = self.scene_regions_by_path.get(normalized_path)
                     result = process_image(
                         image_path=image_path,
                         lane_detector=lane_detector,
@@ -124,6 +132,7 @@ class ProcessingWorker(QtCore.QObject):
                         output_dir=self.output_dir,
                         layers=self.layers,
                         lane_override_polygons=lane_override,
+                        scene_regions=scene_regions,
                     )
                     if record_id <= 0:
                         raise RuntimeError("Failed to create running database record")
