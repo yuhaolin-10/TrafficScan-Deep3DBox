@@ -10,6 +10,50 @@ sys.path.append(src_dir)
 from services.database_manager import DatabaseManager
 
 
+def test_init_db_removes_obsolete_scene_config_tables(tmp_path):
+    db_path = tmp_path / "traffic_scan.db"
+
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.executescript(
+            """
+            CREATE TABLE scene_profiles (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                camera_id TEXT NOT NULL
+            );
+            CREATE TABLE scene_regions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                scene_profile_id INTEGER NOT NULL,
+                region_name TEXT NOT NULL
+            );
+            CREATE TABLE count_rules (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                scene_profile_id INTEGER NOT NULL,
+                rule_name TEXT NOT NULL
+            );
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    manager = DatabaseManager(db_path)
+    manager.close()
+
+    conn = sqlite3.connect(db_path)
+    try:
+        table_names = {
+            row[0]
+            for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        }
+    finally:
+        conn.close()
+
+    assert "scene_profiles" not in table_names
+    assert "scene_regions" not in table_names
+    assert "count_rules" not in table_names
+
+
 def test_start_record_persists_video_media_type(tmp_path):
     db_path = tmp_path / "traffic_scan.db"
     manager = DatabaseManager(db_path)

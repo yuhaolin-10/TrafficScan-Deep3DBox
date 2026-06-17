@@ -158,6 +158,124 @@ def test_region_rule_engine_triggers_no_parking_from_stationary_duration():
     assert detections[0]["is_violating"] is True
 
 
+def test_region_rule_engine_default_no_parking_threshold_is_three_seconds():
+    engine = RegionRuleEngine(_scene_region(RULE_NO_PARKING))
+
+    detections, events, summary = engine.apply(
+        [_detection("T0202", "car", (50, 60), track_hits=2)],
+        frame_index=0,
+        timestamp_s=0.0,
+    )
+    assert events == []
+    assert summary[RULE_NO_PARKING] == 0
+    assert detections[0].get("is_violating", False) is False
+
+    detections, events, summary = engine.apply(
+        [_detection("T0202", "car", (51, 60), previous_anchor=(50, 60), track_hits=3)],
+        frame_index=1,
+        timestamp_s=3.1,
+    )
+    assert len(events) == 1
+    assert events[0]["rule_type"] == RULE_NO_PARKING
+    assert summary[RULE_NO_PARKING] == 1
+    assert detections[0]["is_violating"] is True
+
+
+def test_region_rule_engine_default_no_parking_allows_slow_drift():
+    engine = RegionRuleEngine(_scene_region(RULE_NO_PARKING))
+
+    detections, events, summary = engine.apply(
+        [_detection("T0203", "car", (20, 60), track_hits=2)],
+        frame_index=0,
+        timestamp_s=0.0,
+    )
+    assert events == []
+    assert summary[RULE_NO_PARKING] == 0
+    assert detections[0].get("is_violating", False) is False
+
+    detections, events, summary = engine.apply(
+        [_detection("T0203", "car", (80, 60), previous_anchor=(20, 60), track_hits=3)],
+        frame_index=1,
+        timestamp_s=1.0,
+    )
+    assert events == []
+    assert summary[RULE_NO_PARKING] == 0
+    assert detections[0].get("is_violating", False) is False
+
+    detections, events, summary = engine.apply(
+        [_detection("T0203", "car", (95, 60), previous_anchor=(80, 60), track_hits=4)],
+        frame_index=2,
+        timestamp_s=3.1,
+    )
+    assert len(events) == 1
+    assert events[0]["rule_type"] == RULE_NO_PARKING
+    assert summary[RULE_NO_PARKING] == 1
+    assert detections[0]["is_violating"] is True
+
+
+def test_region_rule_engine_prioritizes_low_speed_parking_over_wrong_way():
+    engine = RegionRuleEngine(
+        [
+            {
+                "region_id": "region_01",
+                "name": "Region 1",
+                "points": REGION_POLYGON,
+                "direction_line": [[20, 50], [80, 50]],
+                "rule_bindings": [
+                    {
+                        "rule_type": RULE_NO_WRONG_WAY,
+                        "enabled": True,
+                        "params": {
+                            "min_consecutive_frames": 2,
+                            "min_direction_distance_px": 10.0,
+                            "wrong_way_dot_threshold": -0.2,
+                            "min_roi_overlap_ratio": 0.2,
+                            "min_confirmed_hits": 2,
+                        },
+                    },
+                    {
+                        "rule_type": RULE_NO_PARKING,
+                        "enabled": True,
+                        "params": {
+                            "min_stop_seconds": 5.0,
+                            "max_speed_px_per_s": 24.0,
+                            "min_confirmed_hits": 2,
+                        },
+                    },
+                ],
+            }
+        ]
+    )
+
+    samples = [
+        ((80, 50), None, 2, 0.0),
+        ((65, 50), (80, 50), 3, 2.0),
+        ((50, 50), (65, 50), 4, 4.0),
+    ]
+    for frame_index, (anchor, previous_anchor, hits, timestamp_s) in enumerate(samples):
+        detections, events, summary = engine.apply(
+            [_detection("T0102", "car", anchor, previous_anchor=previous_anchor, track_hits=hits)],
+            frame_index=frame_index,
+            timestamp_s=timestamp_s,
+        )
+        assert events == []
+        assert summary[RULE_NO_WRONG_WAY] == 0
+        assert detections[0].get("is_violating", False) is False
+
+    detections, events, summary = engine.apply(
+        [_detection("T0102", "car", (45, 50), previous_anchor=(50, 50), track_hits=5)],
+        frame_index=3,
+        timestamp_s=6.0,
+    )
+
+    assert len(events) == 1
+    assert events[0]["rule_type"] == RULE_NO_PARKING
+    assert summary[RULE_NO_PARKING] == 1
+    assert summary[RULE_NO_WRONG_WAY] == 0
+    assert detections[0]["is_violating"] is True
+    assert detections[0]["rule_violations"][0]["rule_type"] == RULE_NO_PARKING
+
+
 def test_region_rule_engine_triggers_no_wrong_way_against_allowed_direction():
     engine = RegionRuleEngine(
         _scene_region(

@@ -2,6 +2,8 @@
 .codex_tmp/
 data/
 images/
+thesis/
+Docs/开题报告_车辆违章识别系统.md
 
 # Model weights and checkpoints
 src/models/
@@ -16,6 +18,13 @@ __pycache__/
 *.pyo
 *.pyd
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+.coverage
+.coverage.*
+htmlcov/
 
 # Experiment outputs and vendored environments
 experiments/**/outputs/
@@ -30,6 +39,8 @@ dist/
 build/
 dist-ssr/
 coverage/
+.next/
+.vite/
 
 # Logs and temp files
 *.log
@@ -40,6 +51,8 @@ temp/
 *.bak
 *.cache
 .cache/
+*.orig
+*.rej
 
 # Environment files
 .env
@@ -47,6 +60,11 @@ temp/
 .env.development
 .env.production
 .env.*.local
+.venv/
+venv/
+env/
+ENV/
+__pypackages__/
 
 # IDE and editor files
 .vscode/
@@ -84,3 +102,32 @@ $RECYCLE.BIN/
 .claude/worktrees/
 .claude/settings.local.json
 external/MonoGround/
+
+# Local databases and generated exports
+*.db
+*.sqlite
+*.sqlite3
+*.db-journal
+*.db-shm
+*.db-wal
+
+# Office/editor temporary documents
+~$*.docx
+~$*.xlsx
+~$*.pptx
+work_doc_*.docx
+*.docx
+
+# Additional model/export formats
+/*.onnx
+/*.engine
+/*.tflite
+/*.pb
+*.weights
+
+# Local media assets; keep curated samples in a dedicated tracked docs folder if needed
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.webm

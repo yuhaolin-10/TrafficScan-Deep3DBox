@@ -1,16 +1,13 @@
 import sys
 import traceback
+from pathlib import Path
 
-try:
-    from .main_window import MainWindow
-    from .qt import QtGui, QtWidgets, exec_app
-except Exception:
-    try:
-        from gui.main_window import MainWindow
-        from gui.qt import QtGui, QtWidgets, exec_app
-    except Exception:
-        from main_window import MainWindow
-        from qt import QtGui, QtWidgets, exec_app
+SRC_DIR = Path(__file__).resolve().parent.parent
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
+
+from gui.main_window import MainWindow
+from gui.qt import QtGui, QtWidgets, exec_app
 
 
 def create_app():

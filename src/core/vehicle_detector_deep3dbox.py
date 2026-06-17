@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import math
 from pathlib import Path
@@ -456,8 +456,14 @@ class VehicleDetector3D:
                 continue
 
             mask_polygons = []
-            if result.masks is not None and result.masks.xy is not None:
-                mask_polygons = list(result.masks.xy)
+            if result.masks is not None:
+                try:
+                    masks_xy = result.masks.xy
+                    if masks_xy is not None and len(masks_xy) > 0:
+                        mask_polygons = list(masks_xy)
+                except (AttributeError, ValueError):
+                    # 如果masks.xy不存在或有数组比较问题，跳过
+                    pass
 
             xyxy_all = boxes.xyxy.cpu().numpy()
             cls_all = boxes.cls.cpu().numpy().astype(int)
@@ -545,5 +551,3 @@ class VehicleDetector3D:
                 detections.append(det)
 
         return detections
-
-

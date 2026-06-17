@@ -15,6 +15,9 @@ RULE_NO_PARKING = "no_parking"
 RULE_NO_NON_MOTOR = "no_non_motor"
 RULE_NO_WRONG_WAY = "no_wrong_way"
 
+DEFAULT_NO_PARKING_MIN_STOP_SECONDS = 3.0
+DEFAULT_NO_PARKING_MAX_SPEED_PX_PER_S = 72.0
+
 RULE_DISPLAY_NAMES = {
     RULE_EMERGENCY_LANE_OCCUPATION: "占用应急车道",
     RULE_NO_PARKING: "禁止停车",
@@ -323,8 +326,14 @@ class RegionRuleEngine:
             str(item).strip().lower()
             for item in params.get("target_classes", ["car", "truck", "bus", "motorcycle"])
         }
-        min_stop_seconds = max(1.0, float(params.get("min_stop_seconds", 5.0) or 5.0))
-        max_speed = max(1.0, float(params.get("max_speed_px_per_s", 24.0) or 24.0))
+        min_stop_seconds = max(
+            1.0,
+            float(params.get("min_stop_seconds", DEFAULT_NO_PARKING_MIN_STOP_SECONDS) or DEFAULT_NO_PARKING_MIN_STOP_SECONDS),
+        )
+        max_speed = max(
+            1.0,
+            float(params.get("max_speed_px_per_s", DEFAULT_NO_PARKING_MAX_SPEED_PX_PER_S) or DEFAULT_NO_PARKING_MAX_SPEED_PX_PER_S),
+        )
         min_hits = max(1, int(params.get("min_confirmed_hits", 2) or 2))
         vehicle_type = str(detection.get("vehicle_type", "") or "").strip().lower()
         if not inside or vehicle_type not in target_classes or int(detection.get("track_hits", 0) or 0) < min_hits:
@@ -354,6 +363,29 @@ class RegionRuleEngine:
             return None
         state["triggered"] = True
         return self._new_event(detection, region, RULE_NO_PARKING, frame_index=frame_index, timestamp_s=timestamp_s)
+
+    def _is_no_parking_low_speed_candidate(self, detection: dict, binding: dict, state: dict, *, inside: bool, timestamp_s=None) -> bool:
+        params = dict(binding.get("params", {}) or {})
+        target_classes = {
+            str(item).strip().lower()
+            for item in params.get("target_classes", ["car", "truck", "bus", "motorcycle"])
+        }
+        max_speed = max(
+            1.0,
+            float(params.get("max_speed_px_per_s", DEFAULT_NO_PARKING_MAX_SPEED_PX_PER_S) or DEFAULT_NO_PARKING_MAX_SPEED_PX_PER_S),
+        )
+        min_hits = max(1, int(params.get("min_confirmed_hits", 2) or 2))
+        vehicle_type = str(detection.get("vehicle_type", "") or "").strip().lower()
+        if not inside or vehicle_type not in target_classes or int(detection.get("track_hits", 0) or 0) < min_hits:
+            return False
+        current_anchor = detection.get("track_anchor", [])
+        speed = self._movement_speed(detection.get("track_previous_anchor", []), current_anchor, state, timestamp_s)
+        return bool(speed <= max_speed)
+
+    def _reset_wrong_way_motion_state(self, state: dict):
+        state["bad_frames"] = 0
+        state["entry_anchor"] = None
+        state["triggered"] = False
 
     def _apply_no_wrong_way(self, detection: dict, region: RegionRuleSpec, binding: dict, state: dict, *, inside: bool, overlap_ratio=0.0, frame_index=None, timestamp_s=None):
         if region.direction_unit is None:
@@ -495,6 +527,20 @@ class RegionRuleEngine:
                 continue
             for region in self.regions:
                 inside = _point_in_polygon(anchor, region.polygon)
+                parking_low_speed_candidate = False
+                for binding in region.rule_bindings:
+                    if str(binding.get("rule_type", "") or "").strip().lower() != RULE_NO_PARKING:
+                        continue
+                    parking_state = self._rule_state(track_id, region, RULE_NO_PARKING)
+                    if self._is_no_parking_low_speed_candidate(
+                        detection,
+                        binding=binding,
+                        state=parking_state,
+                        inside=inside,
+                        timestamp_s=timestamp_s,
+                    ):
+                        parking_low_speed_candidate = True
+                        break
                 for binding in region.rule_bindings:
                     rule_type = str(binding.get("rule_type", "") or "").strip().lower()
                     if not rule_type:
@@ -523,6 +569,12 @@ class RegionRuleEngine:
                             timestamp_s=timestamp_s,
                         )
                     elif rule_type == RULE_NO_WRONG_WAY:
+                        if parking_low_speed_candidate:
+                            self._reset_wrong_way_motion_state(state)
+                            state["last_anchor"] = anchor
+                            state["last_timestamp_s"] = None if timestamp_s is None else float(timestamp_s)
+                            state["last_seen_frame"] = None if frame_index is None else int(frame_index)
+                            continue
                         params = dict(binding.get("params", {}) or {})
                         overlap_ratio = _polygon_overlap_ratio(
                             detection.get("footprint", []),

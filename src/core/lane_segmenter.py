@@ -35,17 +35,25 @@ class LaneSegmenter:
         combined_mask = np.zeros((h, w), dtype=np.uint8)
         polygons = []
         
-        if results[0].masks is not None:
-            # 遍历检测到的掩码
-            if results[0].masks.xy is not None:
-                for seg in results[0].masks.xy:
-                    # 确保分割点存在
-                    if len(seg) > 0:
-                        # 转换为整数格式以便绘制
-                        poly = np.array(seg, dtype=np.int32)
-                        polygons.append(poly)
-                        
-                        # 在掩码上填充多边形 (255表示白色，即车道区域)
-                        cv2.fillPoly(combined_mask, [poly], 255)
+        # 安全地检查结果，防止数组比较错误
+        if len(results) > 0:
+            result = results[0]
+            if result.masks is not None:
+                # 使用 .cpu().numpy() 确保是标准的numpy数组，而不是tensor
+                try:
+                    masks_xy = result.masks.xy
+                    # 使用 .any() 来安全地检查数组
+                    if masks_xy is not None and len(masks_xy) > 0:
+                        for seg in masks_xy:
+                            if len(seg) > 0:
+                                poly = np.array(seg, dtype=np.int32)
+                                polygons.append(poly)
+                                cv2.fillPoly(combined_mask, [poly], 255)
+                except AttributeError:
+                    # 如果masks.xy不存在，跳过
+                    pass
+                except ValueError:
+                    # 如果存在数组比较错误，安全处理
+                    pass
                 
         return combined_mask, polygons

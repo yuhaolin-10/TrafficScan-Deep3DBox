@@ -701,8 +701,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if key == "no_parking":
             return {
                 "target_classes": ["car", "truck", "bus", "motorcycle"],
-                "min_stop_seconds": 5.0,
-                "max_speed_px_per_s": 24.0,
+                "min_stop_seconds": 3.0,
+                "max_speed_px_per_s": 72.0,
                 "min_confirmed_hits": 2,
             }
         if key == "no_non_motor":
@@ -769,10 +769,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 max(0.0, float(merged_params.get("min_roi_overlap_ratio", 0.20) or 0.20)),
             )
         if payload["rule_type"] == "no_parking":
-            merged_params["min_stop_seconds"] = 5.0
+            merged_params["min_stop_seconds"] = 3.0
             merged_params["max_speed_px_per_s"] = max(
-                24.0,
-                float(merged_params.get("max_speed_px_per_s", 24.0) or 24.0),
+                72.0,
+                float(merged_params.get("max_speed_px_per_s", 72.0) or 72.0),
             )
         if payload["rule_type"] == "no_non_motor":
             target_classes = [

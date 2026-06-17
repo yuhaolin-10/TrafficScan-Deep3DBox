@@ -2,6 +2,7 @@ import sys
 from pathlib import Path
 
 import cv2
+import numpy as np
 
 SRC_DIR = Path(__file__).resolve().parent.parent
 if str(SRC_DIR) not in sys.path:
@@ -40,14 +41,16 @@ class LaneRecognitionWorker(QtCore.QObject):
 
     def _normalize_polygons(self, polygons):
         normalized = []
-        for polygon in list(polygons or []):
+        if polygons is None:
+            return normalized
+        for polygon in list(polygons):
+            arr = np.asarray(polygon, dtype=np.float32)
+            if arr.ndim != 2 or arr.shape[0] < 3 or arr.shape[1] != 2:
+                continue
             points = []
-            for point in list(polygon or []):
-                if point is None or len(point) != 2:
-                    continue
+            for point in arr:
                 points.append([float(point[0]), float(point[1])])
-            if len(points) >= 3:
-                normalized.append(points)
+            normalized.append(points)
         return normalized
 
     def _load_frame(self):
